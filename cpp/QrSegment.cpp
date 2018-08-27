@@ -22,9 +22,13 @@
  */
 
 #include <climits>
-#include <cstddef>
-#include "BitBuffer.hpp"
+#include <cstring>
+#include <stdexcept>
+#include <utility>
 #include "QrSegment.hpp"
+
+using std::uint8_t;
+using std::vector;
 
 
 namespace qrcodegen {
@@ -37,11 +41,16 @@ QrSegment::Mode::Mode(int mode, int cc0, int cc1, int cc2) :
 }
 
 
+int QrSegment::Mode::getModeBits() const {
+	return modeBits;
+}
+
+
 int QrSegment::Mode::numCharCountBits(int ver) const {
 	if      ( 1 <= ver && ver <=  9)  return numBitsCharCount[0];
 	else if (10 <= ver && ver <= 26)  return numBitsCharCount[1];
 	else if (27 <= ver && ver <= 40)  return numBitsCharCount[2];
-	else  throw "Version number out of range";
+	else  throw std::domain_error("Version number out of range");
 }
 
 
@@ -49,13 +58,17 @@ const QrSegment::Mode QrSegment::Mode::NUMERIC     (0x1, 10, 12, 14);
 const QrSegment::Mode QrSegment::Mode::ALPHANUMERIC(0x2,  9, 11, 13);
 const QrSegment::Mode QrSegment::Mode::BYTE        (0x4,  8, 16, 16);
 const QrSegment::Mode QrSegment::Mode::KANJI       (0x8,  8, 10, 12);
+const QrSegment::Mode QrSegment::Mode::ECI         (0x7,  0,  0,  0);
 
 
 
-QrSegment QrSegment::makeBytes(const std::vector<uint8_t> &data) {
-	if (data.size() >= (unsigned int)INT_MAX / 8)
-		throw "Buffer too long";
-	return QrSegment(Mode::BYTE, (int)data.size(), data, (int)data.size() * 8);
+QrSegment QrSegment::makeBytes(const vector<uint8_t> &data) {
+	if (data.size() > INT_MAX)
+		throw std::length_error("Data too long");
+	BitBuffer bb;
+	for (uint8_t b : data)
+		bb.appendBits(b, 8);
+	return QrSegment(Mode::BYTE, static_cast<int>(data.size()), std::move(bb));
 }
 
 
@@ -67,7 +80,7 @@ QrSegment QrSegment::makeNumeric(const char *digits) {
 	for (; *digits != '\0'; digits++, charCount++) {
 		char c = *digits;
 		if (c < '0' || c > '9')
-			throw "String contains non-numeric characters";
+			throw std::domain_error("String contains non-numeric characters");
 		accumData = accumData * 10 + (c - '0');
 		accumCount++;
 		if (accumCount == 3) {
@@ -78,7 +91,7 @@ QrSegment QrSegment::makeNumeric(const char *digits) {
 	}
 	if (accumCount > 0)  // 1 or 2 digits remaining
 		bb.appendBits(accumData, accumCount * 3 + 1);
-	return QrSegment(Mode::NUMERIC, charCount, bb.getBytes(), bb.getBitLength());
+	return QrSegment(Mode::NUMERIC, charCount, std::move(bb));
 }
 
 
@@ -88,10 +101,10 @@ QrSegment QrSegment::makeAlphanumeric(const char *text) {
 	int accumCount = 0;
 	int charCount = 0;
 	for (; *text != '\0'; text++, charCount++) {
-		char c = *text;
-		if (c < ' ' || c > 'Z')
-			throw "String contains unencodable characters in alphanumeric mode";
-		accumData = accumData * 45 + ALPHANUMERIC_ENCODING_TABLE[c - ' '];
+		const char *temp = std::strchr(ALPHANUMERIC_CHARSET, *text);
+		if (temp == nullptr)
+			throw std::domain_error("String contains unencodable characters in alphanumeric mode");
+		accumData = accumData * 45 + (temp - ALPHANUMERIC_CHARSET);
 		accumCount++;
 		if (accumCount == 2) {
 			bb.appendBits(accumData, 11);
@@ -101,52 +114,77 @@ QrSegment QrSegment::makeAlphanumeric(const char *text) {
 	}
 	if (accumCount > 0)  // 1 character remaining
 		bb.appendBits(accumData, 6);
-	return QrSegment(Mode::ALPHANUMERIC, charCount, bb.getBytes(), bb.getBitLength());
+	return QrSegment(Mode::ALPHANUMERIC, charCount, std::move(bb));
 }
 
 
-std::vector<QrSegment> QrSegment::makeSegments(const char *text) {
+vector<QrSegment> QrSegment::makeSegments(const char *text) {
 	// Select the most efficient segment encoding automatically
-	std::vector<QrSegment> result;
-	if (*text == '\0');  // Leave the vector empty
-	else if (QrSegment::isNumeric(text))
-		result.push_back(QrSegment::makeNumeric(text));
-	else if (QrSegment::isAlphanumeric(text))
-		result.push_back(QrSegment::makeAlphanumeric(text));
+	vector<QrSegment> result;
+	if (*text == '\0');  // Leave result empty
+	else if (isNumeric(text))
+		result.push_back(makeNumeric(text));
+	else if (isAlphanumeric(text))
+		result.push_back(makeAlphanumeric(text));
 	else {
-		std::vector<uint8_t> bytes;
+		vector<uint8_t> bytes;
 		for (; *text != '\0'; text++)
 			bytes.push_back(static_cast<uint8_t>(*text));
-		result.push_back(QrSegment::makeBytes(bytes));
+		result.push_back(makeBytes(bytes));
 	}
 	return result;
 }
 
 
-QrSegment::QrSegment(const Mode &md, int numCh, const std::vector<uint8_t> &b, int bitLen) :
-		mode(md),
-		numChars(numCh),
-		data(b),
-		bitLength(bitLen) {
-	if (numCh < 0 || bitLen < 0 || b.size() != static_cast<unsigned int>((bitLen + 7) / 8))
-		throw "Invalid value";
+QrSegment QrSegment::makeEci(long assignVal) {
+	BitBuffer bb;
+	if (0 <= assignVal && assignVal < (1 << 7))
+		bb.appendBits(assignVal, 8);
+	else if ((1 << 7) <= assignVal && assignVal < (1 << 14)) {
+		bb.appendBits(2, 2);
+		bb.appendBits(assignVal, 14);
+	} else if ((1 << 14) <= assignVal && assignVal < 1000000L) {
+		bb.appendBits(6, 3);
+		bb.appendBits(assignVal, 21);
+	} else
+		throw std::domain_error("ECI assignment value out of range");
+	return QrSegment(Mode::ECI, 0, std::move(bb));
 }
 
 
-int QrSegment::getTotalBits(const std::vector<QrSegment> &segs, int version) {
+QrSegment::QrSegment(Mode md, int numCh, const std::vector<bool> &dt) :
+		mode(md),
+		numChars(numCh),
+		data(dt) {
+	if (numCh < 0)
+		throw std::domain_error("Invalid value");
+}
+
+
+QrSegment::QrSegment(Mode md, int numCh, std::vector<bool> &&dt) :
+		mode(md),
+		numChars(numCh),
+		data(std::move(dt)) {
+	if (numCh < 0)
+		throw std::domain_error("Invalid value");
+}
+
+
+int QrSegment::getTotalBits(const vector<QrSegment> &segs, int version) {
 	if (version < 1 || version > 40)
-		throw "Version number out of range";
+		throw std::domain_error("Version number out of range");
 	int result = 0;
-	for (size_t i = 0; i < segs.size(); i++) {
-		const QrSegment &seg(segs.at(i));
+	for (const QrSegment &seg : segs) {
 		int ccbits = seg.mode.numCharCountBits(version);
 		// Fail if segment length value doesn't fit in the length field's bit-width
-		if (seg.numChars >= (1L << ccbits) || seg.bitLength > INT16_MAX)
+		if (seg.numChars >= (1L << ccbits))
 			return -1;
-		long temp = (long)result + 4 + ccbits + seg.bitLength;
-		if (temp > INT_MAX)
+		if (4 + ccbits > INT_MAX - result)
 			return -1;
-		result = temp;
+		result += 4 + ccbits;
+		if (seg.data.size() > static_cast<unsigned int>(INT_MAX - result))
+			return -1;
+		result += static_cast<int>(seg.data.size());
 	}
 	return result;
 }
@@ -154,8 +192,7 @@ int QrSegment::getTotalBits(const std::vector<QrSegment> &segs, int version) {
 
 bool QrSegment::isAlphanumeric(const char *text) {
 	for (; *text != '\0'; text++) {
-		char c = *text;
-		if (c < ' ' || c > 'Z' || ALPHANUMERIC_ENCODING_TABLE[c - ' '] == -1)
+		if (std::strchr(ALPHANUMERIC_CHARSET, *text) == nullptr)
 			return false;
 	}
 	return true;
@@ -172,11 +209,21 @@ bool QrSegment::isNumeric(const char *text) {
 }
 
 
-const int8_t QrSegment::ALPHANUMERIC_ENCODING_TABLE[59] = {
-	// SP,  !,  ",  #,  $,  %,  &,  ',  (,  ),  *,  +,  ,,  -,  .,  /,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  :,  ;,  <,  =,  >,  ?,  @,  // ASCII codes 32 to 64
-	   36, -1, -1, -1, 37, 38, -1, -1, -1, -1, 39, 40, -1, 41, 42, 43,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 44, -1, -1, -1, -1, -1, -1,  // Array indices 0 to 32
-	   10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,  // Array indices 33 to 58
-	//  A,  B,  C,  D,  E,  F,  G,  H,  I,  J,  K,  L,  M,  N,  O,  P,  Q,  R,  S,  T,  U,  V,  W,  X,  Y,  Z,  // ASCII codes 65 to 90
-};
+QrSegment::Mode QrSegment::getMode() const {
+	return mode;
+}
+
+
+int QrSegment::getNumChars() const {
+	return numChars;
+}
+
+
+const std::vector<bool> &QrSegment::getData() const {
+	return data;
+}
+
+
+const char *QrSegment::ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
 
 }

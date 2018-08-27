@@ -31,13 +31,13 @@ This module "qrcodegen", public members:
   - Function encode_binary(bytes data, QrCode.Ecc ecl) -> QrCode
   - Function encode_segments(list<QrSegment> segs, QrCode.Ecc ecl,
         int minversion=1, int maxversion=40, mask=-1, boostecl=true) -> QrCode
-  - Constructor QrCode(QrCode qr, int mask)
+  - Constants int MIN_VERSION, MAX_VERSION
   - Constructor QrCode(bytes datacodewords, int mask, int version, QrCode.Ecc ecl)
   - Method get_version() -> int
   - Method get_size() -> int
   - Method get_error_correction_level() -> QrCode.Ecc
   - Method get_mask() -> int
-  - Method get_module(int x, int y) -> int
+  - Method get_module(int x, int y) -> bool
   - Method to_svg_str(int border) -> str
   - Enum Ecc:
     - Constants LOW, MEDIUM, QUARTILE, HIGH
@@ -47,13 +47,14 @@ This module "qrcodegen", public members:
   - Function make_numeric(str digits) -> QrSegment
   - Function make_alphanumeric(str text) -> QrSegment
   - Function make_segments(str text) -> list<QrSegment>
+  - Function make_eci(int assignval) -> QrSegment
   - Constructor QrSegment(QrSegment.Mode mode, int numch, list<int> bitdata)
   - Method get_mode() -> QrSegment.Mode
   - Method get_num_chars() -> int
   - Method get_bits() -> list<int>
   - Constants regex NUMERIC_REGEX, ALPHANUMERIC_REGEX
   - Enum Mode:
-    - Constants NUMERIC, ALPHANUMERIC, BYTE, KANJI
+    - Constants NUMERIC, ALPHANUMERIC, BYTE, KANJI, ECI
 """
 
 
@@ -67,10 +68,11 @@ class QrCode(object):
 	
 	@staticmethod
 	def encode_text(text, ecl):
-		"""Returns a QR Code symbol representing the given Unicode text string at the given error correction level.
-		As a conservative upper bound, this function is guaranteed to succeed for strings that have 738 or fewer Unicode
-		code points (not UTF-16 code units). The smallest possible QR Code version is automatically chosen for the output.
-		The ECC level of the result may be higher than the ecl argument if it can be done without increasing the version."""
+		"""Returns a QR Code symbol representing the specified Unicode text string at the specified error correction level.
+		As a conservative upper bound, this function is guaranteed to succeed for strings that have 738 or fewer
+		Unicode code points (not UTF-16 code units) if the low error correction level is used. The smallest possible
+		QR Code version is automatically chosen for the output. The ECC level of the result may be higher than the
+		ecl argument if it can be done without increasing the version."""
 		segs = QrSegment.make_segments(text)
 		return QrCode.encode_segments(segs, ecl)
 	
@@ -81,8 +83,8 @@ class QrCode(object):
 		This function always encodes using the binary segment mode, not any text mode. The maximum number of
 		bytes allowed is 2953. The smallest possible QR Code version is automatically chosen for the output.
 		The ECC level of the result may be higher than the ecl argument if it can be done without increasing the version."""
-		if not isinstance(data, bytes):
-			raise TypeError("Binary array expected")
+		if not isinstance(data, (bytes, bytearray)):
+			raise TypeError("Byte string/list expected")
 		return QrCode.encode_segments([QrSegment.make_bytes(data)], ecl)
 	
 	
@@ -94,7 +96,7 @@ class QrCode(object):
 		between modes (such as alphanumeric and binary) to encode text more efficiently.
 		This function is considered to be lower level than simply encoding text or binary data."""
 		
-		if not 1 <= minversion <= maxversion <= 40 or not -1 <= mask <= 7:
+		if not (QrCode.MIN_VERSION <= minversion <= maxversion <= QrCode.MAX_VERSION) or not (-1 <= mask <= 7):
 			raise ValueError("Invalid value")
 		
 		# Find the minimal version number to use
@@ -109,80 +111,67 @@ class QrCode(object):
 			raise AssertionError()
 		
 		# Increase the error correction level while the data still fits in the current version number
-		for newecl in (QrCode.Ecc.MEDIUM, QrCode.Ecc.QUARTILE, QrCode.Ecc.HIGH):
+		for newecl in (QrCode.Ecc.MEDIUM, QrCode.Ecc.QUARTILE, QrCode.Ecc.HIGH):  # From low to high
 			if boostecl and datausedbits <= QrCode._get_num_data_codewords(version, newecl) * 8:
 				ecl = newecl
 		
-		# Create the data bit string by concatenating all segments
-		datacapacitybits = QrCode._get_num_data_codewords(version, ecl) * 8
+		# Concatenate all segments to create the data bit string
 		bb = _BitBuffer()
 		for seg in segs:
 			bb.append_bits(seg.get_mode().get_mode_bits(), 4)
 			bb.append_bits(seg.get_num_chars(), seg.get_mode().num_char_count_bits(version))
-			bb.append_all(seg)
+			bb.extend(seg._bitdata)
 		
 		# Add terminator and pad up to a byte if applicable
-		bb.append_bits(0, min(4, datacapacitybits - bb.bit_length()))
-		bb.append_bits(0, -bb.bit_length() % 8)
+		datacapacitybits = QrCode._get_num_data_codewords(version, ecl) * 8
+		assert len(bb) <= datacapacitybits
+		bb.append_bits(0, min(4, datacapacitybits - len(bb)))
+		bb.append_bits(0, -len(bb) % 8)  # Note: Python's modulo on negative numbers behaves better than C family languages
+		assert len(bb) % 8 == 0
 		
-		# Pad with alternate bytes until data capacity is reached
+		# Pad with alternating bytes until data capacity is reached
 		for padbyte in itertools.cycle((0xEC, 0x11)):
-			if bb.bit_length() >= datacapacitybits:
+			if len(bb) >= datacapacitybits:
 				break
 			bb.append_bits(padbyte, 8)
-		assert bb.bit_length() % 8 == 0
 		
 		# Create the QR Code symbol
-		return QrCode(None, bb.get_bytes(), mask, version, ecl)
+		return QrCode(bb.get_bytes(), mask, version, ecl)
+	
+	
+	# ---- Public constants ----
+	
+	MIN_VERSION =  1
+	MAX_VERSION = 40
 	
 	
 	# ---- Constructor ----
 	
-	def __init__(self, qrcode=None, datacodewords=None, mask=None, version=None, errcorlvl=None):
-		"""This constructor can be called in one of two ways:
-		- QrCode(datacodewords=list<int>, mask=int, version=int, errcorlvl=QrCode.Ecc):
-		      Creates a new QR Code symbol with the given version number, error correction level, binary data array,
-		      and mask number. This is a cumbersome low-level constructor that should not be invoked directly by the user.
-		      To go one level up, see the QrCode.encode_segments() function.
-		- QrCode(qrcode=QrCode, mask=int):
-		      Creates a new QR Code symbol based on the given existing object, but with a potentially different
-		      mask pattern. The version, error correction level, codewords, etc. of the newly created object are
-		      all identical to the argument object; only the mask may differ.
-		In both cases, mask = -1 is for automatic choice or 0 to 7 for fixed choice."""
+	def __init__(self, datacodewords, mask, version, errcorlvl):
+		"""Creates a new QR Code symbol with the given version number, error correction level, binary data array,
+		and mask number. mask = -1 is for automatic choice, or 0 to 7 for fixed choice. This is a cumbersome low-level constructor
+		that should not be invoked directly by the user. To go one level up, see the QrCode.encode_segments() function."""
 		
 		# Check arguments and handle simple scalar fields
-		if not -1 <= mask <= 7:
+		if not (-1 <= mask <= 7):
 			raise ValueError("Mask value out of range")
-		if datacodewords is not None and qrcode is None:
-			if not 1 <= version <= 40:
-				raise ValueError("Version value out of range")
-			if not isinstance(errcorlvl, QrCode.Ecc):
-				raise TypeError("QrCode.Ecc expected")
-		elif qrcode is not None and datacodewords is None:
-			if version is not None or errcorlvl is not None:
-				raise ValueError("Values must be None")
-			version = qrcode._version
-			errcorlvl = qrcode._errcorlvl
-		else:
-			raise ValueError("Exactly one of datacodewords or qrcode must be not None")
+		if not (QrCode.MIN_VERSION <= version <= QrCode.MAX_VERSION):
+			raise ValueError("Version value out of range")
+		if not isinstance(errcorlvl, QrCode.Ecc):
+			raise TypeError("QrCode.Ecc expected")
 		self._version = version
 		self._errcorlvl = errcorlvl
 		self._size = version * 4 + 17
 		
-		if datacodewords is not None:  # Render from scratch a QR Code based on data codewords
-			if len(datacodewords) != QrCode._get_num_data_codewords(version, errcorlvl):
-				raise ValueError("Invalid array length")
-			# Initialize grids of modules
-			self._modules    = [[False] * self._size for _ in range(self._size)]  # The modules of the QR symbol; start with entirely white grid
-			self._isfunction = [[False] * self._size for _ in range(self._size)]  # Indicates function modules that are not subjected to masking
-			# Draw function patterns, draw all codewords
-			self._draw_function_patterns()
-			allcodewords = self._append_error_correction(datacodewords)
-			self._draw_codewords(allcodewords)
-		elif qrcode is not None:  # Modify the mask of an existing QR Code
-			self._modules = [list(row) for row in qrcode._modules]  # Deep copy
-			self._isfunction = qrcode._isfunction  # Shallow copy because the data is read-only
-			self._apply_mask(qrcode._mask)  # Undo existing mask
+		if len(datacodewords) != QrCode._get_num_data_codewords(version, errcorlvl):
+			raise ValueError("Invalid array length")
+		# Initialize grids of modules
+		self._modules    = [[False] * self._size for _ in range(self._size)]  # The modules of the QR symbol; start with entirely white grid
+		self._isfunction = [[False] * self._size for _ in range(self._size)]  # Indicates function modules that are not subjected to masking
+		# Draw function patterns, draw all codewords
+		self._draw_function_patterns()
+		allcodewords = self._add_ecc_and_interleave(datacodewords)
+		self._draw_codewords(allcodewords)
 		
 		# Handle masking
 		if mask == -1:  # Automatically choose best mask
@@ -199,6 +188,7 @@ class QrCode(object):
 		self._draw_format_bits(mask)  # Overwrite old format bits
 		self._apply_mask(mask)  # Apply the final choice of mask
 		self._mask = mask
+		del self._isfunction
 	
 	
 	# ---- Accessor methods ----
@@ -223,9 +213,10 @@ class QrCode(object):
 		return self._mask
 	
 	def get_module(self, x, y):
-		"""Returns the color of the module (pixel) at the given coordinates, which is either 0 for white or 1 for black. The top
-		left corner has the coordinates (x=0, y=0). If the given coordinates are out of bounds, then 0 (white) is returned."""
-		return 1 if (0 <= x < self._size and 0 <= y < self._size and self._modules[y][x]) else 0
+		"""Returns the color of the module (pixel) at the given coordinates, which is either
+		False for white or True for black. The top left corner has the coordinates (x=0, y=0).
+		If the given coordinates are out of bounds, then False (white) is returned."""
+		return (0 <= x < self._size) and (0 <= y < self._size) and self._modules[y][x]
 	
 	
 	# ---- Public instance methods ----
@@ -236,15 +227,15 @@ class QrCode(object):
 		if border < 0:
 			raise ValueError("Border must be non-negative")
 		parts = []
-		for y in range(-border, self._size + border):
-			for x in range(-border, self._size + border):
-				if self.get_module(x, y) == 1:
+		for y in range(self._size):
+			for x in range(self._size):
+				if self.get_module(x, y):
 					parts.append("M{},{}h1v1h-1z".format(x + border, y + border))
 		return """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 {0} {0}">
-	<rect width="100%" height="100%" fill="#FFFFFF" stroke-width="0"/>
-	<path d="{1}" fill="#000000" stroke-width="0"/>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 {0} {0}" stroke="none">
+	<rect width="100%" height="100%" fill="#FFFFFF"/>
+	<path d="{1}" fill="#000000"/>
 </svg>
 """.format(self._size + border * 2, " ".join(parts))
 	
@@ -252,6 +243,7 @@ class QrCode(object):
 	# ---- Private helper methods for constructor: Drawing function modules ----
 	
 	def _draw_function_patterns(self):
+		"""Reads this object's version field, and draws and marks all function modules."""
 		# Draw horizontal and vertical timing patterns
 		for i in range(self._size):
 			self._set_function_module(6, i, i % 2 == 0)
@@ -265,10 +257,10 @@ class QrCode(object):
 		# Draw numerous alignment patterns
 		alignpatpos = QrCode._get_alignment_pattern_positions(self._version)
 		numalign = len(alignpatpos)
-		skips = ((0, 0), (0, numalign - 1), (numalign - 1, 0))  # Skip the three finder corners
+		skips = ((0, 0), (0, numalign - 1), (numalign - 1, 0))
 		for i in range(numalign):
 			for j in range(numalign):
-				if (i, j) not in skips:
+				if (i, j) not in skips:  # Don't draw on the three finder corners
 					self._draw_alignment_pattern(alignpatpos[i], alignpatpos[j])
 		
 		# Draw configuration data
@@ -284,30 +276,29 @@ class QrCode(object):
 		rem = data
 		for _ in range(10):
 			rem = (rem << 1) ^ ((rem >> 9) * 0x537)
-		data = data << 10 | rem
-		data ^= 0x5412  # uint15
-		assert data >> 15 == 0
+		bits = (data << 10 | rem) ^ 0x5412  # uint15
+		assert bits >> 15 == 0
 		
 		# Draw first copy
 		for i in range(0, 6):
-			self._set_function_module(8, i, ((data >> i) & 1) != 0)
-		self._set_function_module(8, 7, ((data >> 6) & 1) != 0)
-		self._set_function_module(8, 8, ((data >> 7) & 1) != 0)
-		self._set_function_module(7, 8, ((data >> 8) & 1) != 0)
+			self._set_function_module(8, i, _get_bit(bits, i))
+		self._set_function_module(8, 7, _get_bit(bits, 6))
+		self._set_function_module(8, 8, _get_bit(bits, 7))
+		self._set_function_module(7, 8, _get_bit(bits, 8))
 		for i in range(9, 15):
-			self._set_function_module(14 - i, 8, ((data >> i) & 1) != 0)
+			self._set_function_module(14 - i, 8, _get_bit(bits, i))
 		
 		# Draw second copy
 		for i in range(0, 8):
-			self._set_function_module(self._size - 1 - i, 8, ((data >> i) & 1) != 0)
+			self._set_function_module(self._size - 1 - i, 8, _get_bit(bits, i))
 		for i in range(8, 15):
-			self._set_function_module(8, self._size - 15 + i, ((data >> i) & 1) != 0)
-		self._set_function_module(8, self._size - 8, True)
+			self._set_function_module(8, self._size - 15 + i, _get_bit(bits, i))
+		self._set_function_module(8, self._size - 8, True)  # Always black
 	
 	
 	def _draw_version(self):
 		"""Draws two copies of the version bits (with its own error correction code),
-		based on this object's version field (which only has an effect for 7 <= version <= 40)."""
+		based on this object's version field, iff 7 <= version <= 40."""
 		if self._version < 7:
 			return
 		
@@ -315,29 +306,32 @@ class QrCode(object):
 		rem = self._version  # version is uint6, in the range [7, 40]
 		for _ in range(12):
 			rem = (rem << 1) ^ ((rem >> 11) * 0x1F25)
-		data = self._version << 12 | rem  # uint18
-		assert data >> 18 == 0
+		bits = self._version << 12 | rem  # uint18
+		assert bits >> 18 == 0
 		
 		# Draw two copies
 		for i in range(18):
-			bit = ((data >> i) & 1) != 0
-			a, b = self._size - 11 + i % 3, i // 3
+			bit = _get_bit(bits, i)
+			a = self._size - 11 + i % 3
+			b = i // 3
 			self._set_function_module(a, b, bit)
 			self._set_function_module(b, a, bit)
 	
 	
 	def _draw_finder_pattern(self, x, y):
-		"""Draws a 9*9 finder pattern including the border separator, with the center module at (x, y)."""
+		"""Draws a 9*9 finder pattern including the border separator,
+		with the center module at (x, y). Modules can be out of bounds."""
 		for i in range(-4, 5):
 			for j in range(-4, 5):
-				dist = max(abs(i), abs(j))  # Chebyshev/infinity norm
 				xx, yy = x + j, y + i
-				if 0 <= xx < self._size and 0 <= yy < self._size:
-					self._set_function_module(xx, yy, dist not in (2, 4))
+				if (0 <= xx < self._size) and (0 <= yy < self._size):
+					# Chebyshev/infinity norm
+					self._set_function_module(xx, yy, max(abs(i), abs(j)) not in (2, 4))
 	
 	
 	def _draw_alignment_pattern(self, x, y):
-		"""Draws a 5*5 alignment pattern, with the center module at (x, y)."""
+		"""Draws a 5*5 alignment pattern, with the center module
+		at (x, y). All modules must be in bounds."""
 		for i in range(-2, 3):
 			for j in range(-2, 3):
 				self._set_function_module(x + j, y + i, max(abs(i), abs(j)) != 1)
@@ -345,7 +339,7 @@ class QrCode(object):
 	
 	def _set_function_module(self, x, y, isblack):
 		"""Sets the color of a module and marks it as a function module.
-		Only used by the constructor. Coordinates must be in range."""
+		Only used by the constructor. Coordinates must be in bounds."""
 		assert type(isblack) is bool
 		self._modules[y][x] = isblack
 		self._isfunction[y][x] = True
@@ -353,7 +347,7 @@ class QrCode(object):
 	
 	# ---- Private helper methods for constructor: Codewords and masking ----
 	
-	def _append_error_correction(self, data):
+	def _add_ecc_and_interleave(self, data):
 		"""Returns a new byte string representing the given data with the appropriate error correction
 		codewords appended to it, based on this object's version and error correction level."""
 		version = self._version
@@ -362,8 +356,9 @@ class QrCode(object):
 		# Calculate parameter numbers
 		numblocks = QrCode._NUM_ERROR_CORRECTION_BLOCKS[self._errcorlvl.ordinal][version]
 		blockecclen = QrCode._ECC_CODEWORDS_PER_BLOCK[self._errcorlvl.ordinal][version]
-		numshortblocks = numblocks - QrCode._get_num_raw_data_modules(version) // 8 % numblocks
-		shortblocklen = self._get_num_raw_data_modules(version) // 8 // numblocks
+		rawcodewords = QrCode._get_num_raw_data_modules(version) // 8
+		numshortblocks = numblocks - rawcodewords % numblocks
+		shortblocklen = rawcodewords // numblocks
 		
 		# Split data into blocks and append ECC to each block
 		blocks = []
@@ -375,8 +370,7 @@ class QrCode(object):
 			ecc = rs.get_remainder(dat)
 			if i < numshortblocks:
 				dat.append(0)
-			dat.extend(ecc)
-			blocks.append(dat)
+			blocks.append(dat + ecc)
 		assert k == len(data)
 		
 		# Interleave (not concatenate) the bytes from every block into a single sequence
@@ -386,7 +380,7 @@ class QrCode(object):
 				# Skip the padding byte in short blocks
 				if i != shortblocklen - blockecclen or j >= numshortblocks:
 					result.append(blk[i])
-		assert len(result) == QrCode._get_num_raw_data_modules(version) // 8
+		assert len(result) == rawcodewords
 		return result
 	
 	
@@ -403,10 +397,10 @@ class QrCode(object):
 			for vert in range(self._size):  # Vertical counter
 				for j in range(2):
 					x = right - j  # Actual x coordinate
-					upward = ((right + 1) & 2) == 0
+					upward = (right + 1) & 2 == 0
 					y = (self._size - 1 - vert) if upward else vert  # Actual y coordinate
 					if not self._isfunction[y][x] and i < len(data) * 8:
-						self._modules[y][x] = ((data[i >> 3] >> (7 - (i & 7))) & 1) != 0
+						self._modules[y][x] = _get_bit(data[i >> 3], 7 - (i & 7))
 						i += 1
 					# If there are any remainder bits (0 to 7), they are already
 					# set to 0/false/white when the grid of modules was initialized
@@ -414,11 +408,12 @@ class QrCode(object):
 	
 	
 	def _apply_mask(self, mask):
-		"""XORs the data modules in this QR Code with the given mask pattern. Due to XOR's mathematical
-		properties, calling applyMask(m) twice with the same value is equivalent to no change at all.
-		This means it is possible to apply a mask, undo it, and try another mask. Note that a final
-		well-formed QR Code symbol needs exactly one mask applied (not zero, not two, etc.)."""
-		if not 0 <= mask <= 7:
+		"""XORs the codeword modules in this QR Code with the given mask pattern.
+		The function modules must be marked and the codeword bits must be drawn
+		before masking. Due to the arithmetic of XOR, calling applyMask() with
+		the same mask value a second time will undo the mask. A final well-formed
+		QR Code symbol needs exactly one (not zero, two, etc.) mask applied."""
+		if not (0 <= mask <= 7):
 			raise ValueError("Mask value out of range")
 		masker = QrCode._MASK_PATTERNS[mask]
 		for y in range(self._size):
@@ -435,10 +430,8 @@ class QrCode(object):
 		
 		# Adjacent modules in row having same color
 		for y in range(size):
-			colorx = modules[y][0]
-			runx = 1
-			for x in range(1, size):
-				if modules[y][x] != colorx:
+			for x in range(size):
+				if x == 0 or modules[y][x] != colorx:
 					colorx = modules[y][x]
 					runx = 1
 				else:
@@ -449,10 +442,8 @@ class QrCode(object):
 						result += 1
 		# Adjacent modules in column having same color
 		for x in range(size):
-			colory = modules[0][x]
-			runy = 1
-			for y in range(1, size):
-				if modules[y][x] != colory:
+			for y in range(size):
+				if y == 0 or modules[y][x] != colory:
 					colory = modules[y][x]
 					runy = 1
 				else:
@@ -484,13 +475,11 @@ class QrCode(object):
 					result += QrCode._PENALTY_N3
 		
 		# Balance of black and white modules
-		black = sum(1 for x in range(size) for y in range(size) if modules[y][x])
-		total = size**2
-		# Find smallest k such that (45-5k)% <= dark/total <= (55+5k)%
-		for k in itertools.count():
-			if (9-k)*total <= black*20 <= (11+k)*total:
-				break
-			result += QrCode._PENALTY_N4
+		black = sum((1 if cell else 0) for row in modules for cell in row)
+		total = size**2  # Note that size is odd, so black/total != 1/2
+		# Compute the smallest integer k >= 0 such that (45-5k)% <= black/total <= (55+5k)%
+		k = (abs(black * 20 - total * 10) + total - 1) // total - 1
+		result += k * QrCode._PENALTY_N4
 		return result
 	
 	
@@ -501,30 +490,25 @@ class QrCode(object):
 		"""Returns a sequence of positions of the alignment patterns in ascending order. These positions are
 		used on both the x and y axes. Each value in the resulting sequence is in the range [0, 177).
 		This stateless pure function could be implemented as table of 40 variable-length lists of integers."""
-		if not 1 <= ver <= 40:
+		if not (QrCode.MIN_VERSION <= ver <= QrCode.MAX_VERSION):
 			raise ValueError("Version number out of range")
 		elif ver == 1:
 			return []
 		else:
 			numalign = ver // 7 + 2
-			if ver != 32:
-				step = (ver * 4 + numalign * 2 + 1) // (2 * numalign - 2) * 2  # ceil((size - 13) / (2*numalign - 2)) * 2
-			else:  # C-C-C-Combo breaker!
-				step = 26
-			result = [6]
-			pos = ver * 4 + 10
-			for i in range(numalign - 1):
-				result.insert(1, pos)
-				pos -= step
-			return result
+			step = 26 if (ver == 32) else \
+				(ver*4 + numalign*2 + 1) // (numalign*2 - 2) * 2
+			start = ver * 4 + 10
+			result = [(start - i * step) for i in range(numalign - 1)] + [6]
+			return list(reversed(result))
 	
 	
 	@staticmethod
 	def _get_num_raw_data_modules(ver):
-		"""Returns the number of raw data modules (bits) available at the given version number.
-		These data modules are used for both user data codewords and error correction codewords.
-		This stateless pure function could be implemented as a 40-entry lookup table."""
-		if not 1 <= ver <= 40:
+		"""Returns the number of data bits that can be stored in a QR Code of the given version number, after
+		all function modules are excluded. This includes remainder bits, so it might not be a multiple of 8.
+		The result is in the range [208, 29648]. This could be implemented as a 40-entry lookup table."""
+		if not (QrCode.MIN_VERSION <= ver <= QrCode.MAX_VERSION):
 			raise ValueError("Version number out of range")
 		result = (16 * ver + 128) * ver + 64
 		if ver >= 2:
@@ -540,9 +524,11 @@ class QrCode(object):
 		"""Returns the number of 8-bit data (i.e. not error correction) codewords contained in any
 		QR Code of the given version number and error correction level, with remainder bits discarded.
 		This stateless pure function could be implemented as a (40*4)-cell lookup table."""
-		if not 1 <= ver <= 40:
+		if not (QrCode.MIN_VERSION <= ver <= QrCode.MAX_VERSION):
 			raise ValueError("Version number out of range")
-		return QrCode._get_num_raw_data_modules(ver) // 8 - QrCode._ECC_CODEWORDS_PER_BLOCK[ecl.ordinal][ver] * QrCode._NUM_ERROR_CORRECTION_BLOCKS[ecl.ordinal][ver]
+		return QrCode._get_num_raw_data_modules(ver) // 8 \
+			- QrCode._ECC_CODEWORDS_PER_BLOCK[ecl.ordinal][ver] \
+			* QrCode._NUM_ERROR_CORRECTION_BLOCKS[ecl.ordinal][ver]
 	
 	
 	# ---- Private tables of constants ----
@@ -613,11 +599,15 @@ class QrSegment(object):
 	@staticmethod
 	def make_bytes(data):
 		"""Returns a segment representing the given binary data encoded in byte mode."""
-		bb = _BitBuffer()
 		py3 = sys.version_info.major >= 3
+		if (py3 and isinstance(data, str)) or (not py3 and isinstance(data, unicode)):
+			raise TypeError("Byte string/list expected")
+		if not py3 and isinstance(data, str):
+			data = bytearray(data)
+		bb = _BitBuffer()
 		for b in data:
-			bb.append_bits((b if py3 else ord(b)), 8)
-		return QrSegment(QrSegment.Mode.BYTE, len(data), bb.get_bits())
+			bb.append_bits(b, 8)
+		return QrSegment(QrSegment.Mode.BYTE, len(data), bb)
 	
 	
 	@staticmethod
@@ -631,13 +621,14 @@ class QrSegment(object):
 		rem = len(digits) % 3
 		if rem > 0:  # 1 or 2 digits remaining
 			bb.append_bits(int(digits[-rem : ]), rem * 3 + 1)
-		return QrSegment(QrSegment.Mode.NUMERIC, len(digits), bb.get_bits())
+		return QrSegment(QrSegment.Mode.NUMERIC, len(digits), bb)
 	
 	
 	@staticmethod
 	def make_alphanumeric(text):
-		"""Returns a segment representing the given text string encoded in alphanumeric mode. The characters allowed are:
-		0 to 9, A to Z (uppercase only), space, dollar, percent, asterisk, plus, hyphen, period, slash, colon."""
+		"""Returns a segment representing the given text string encoded in alphanumeric mode.
+		The characters allowed are: 0 to 9, A to Z (uppercase only), space,
+		dollar, percent, asterisk, plus, hyphen, period, slash, colon."""
 		if QrSegment.ALPHANUMERIC_REGEX.match(text) is None:
 			raise ValueError("String contains unencodable characters in alphanumeric mode")
 		bb = _BitBuffer()
@@ -647,7 +638,7 @@ class QrSegment(object):
 			bb.append_bits(temp, 11)
 		if len(text) % 2 > 0:  # 1 character remaining
 			bb.append_bits(QrSegment._ALPHANUMERIC_ENCODING_TABLE[text[-1]], 6)
-		return QrSegment(QrSegment.Mode.ALPHANUMERIC, len(text), bb.get_bits())
+		return QrSegment(QrSegment.Mode.ALPHANUMERIC, len(text), bb)
 	
 	
 	@staticmethod
@@ -668,6 +659,24 @@ class QrSegment(object):
 			return [QrSegment.make_bytes(text.encode("UTF-8"))]
 	
 	
+	@staticmethod
+	def make_eci(assignval):
+		"""Returns a segment representing an Extended Channel Interpretation
+		(ECI) designator with the given assignment value."""
+		bb = _BitBuffer()
+		if 0 <= assignval < (1 << 7):
+			bb.append_bits(assignval, 8)
+		elif (1 << 7) <= assignval < (1 << 14):
+			bb.append_bits(2, 2)
+			bb.append_bits(assignval, 14)
+		elif (1 << 14) <= assignval < 1000000:
+			bb.append_bits(6, 3)
+			bb.append_bits(assignval, 21)
+		else:
+			raise ValueError("ECI assignment value out of range")
+		return QrSegment(QrSegment.Mode.ECI, 0, bb)
+	
+	
 	# ---- Constructor ----
 	
 	def __init__(self, mode, numch, bitdata):
@@ -675,7 +684,7 @@ class QrSegment(object):
 			raise ValueError()
 		self._mode = mode
 		self._numchars = numch
-		self._bitdata = list(bitdata)  # Defensive copy
+		self._bitdata = list(bitdata)  # Make defensive copy
 	
 	
 	# ---- Accessor methods ----
@@ -687,13 +696,13 @@ class QrSegment(object):
 		return self._numchars
 	
 	def get_bits(self):
-		return list(self._bitdata)  # Defensive copy
+		return list(self._bitdata)  # Make defensive copy
 	
 	
 	# Package-private helper function.
 	@staticmethod
 	def get_total_bits(segs, version):
-		if not 1 <= version <= 40:
+		if not (QrCode.MIN_VERSION <= version <= QrCode.MAX_VERSION):
 			raise ValueError("Version number out of range")
 		result = 0
 		for seg in segs:
@@ -701,7 +710,7 @@ class QrSegment(object):
 			# Fail if segment length value doesn't fit in the length field's bit-width
 			if seg.get_num_chars() >= (1 << ccbits):
 				return None
-			result += 4 + ccbits + len(seg.get_bits())
+			result += 4 + ccbits + len(seg._bitdata)
 		return result
 	
 	
@@ -745,6 +754,7 @@ class QrSegment(object):
 	Mode.ALPHANUMERIC = Mode(0x2, ( 9, 11, 13))
 	Mode.BYTE         = Mode(0x4, ( 8, 16, 16))
 	Mode.KANJI        = Mode(0x8, ( 8, 10, 12))
+	Mode.ECI          = Mode(0x7, ( 0,  0,  0))
 
 
 
@@ -753,7 +763,7 @@ class QrSegment(object):
 class _ReedSolomonGenerator(object):
 	"""Computes the Reed-Solomon error correction codewords for a sequence of data codewords
 	at a given degree. Objects are immutable, and the state only depends on the degree.
-	This class exists because the divisor polynomial does not need to be recalculated for every input."""
+	This class exists because each data block in a QR Code shares the same the divisor polynomial."""
 	
 	def __init__(self, degree):
 		"""Creates a Reed-Solomon ECC generator for the given degree. This could be implemented
@@ -768,31 +778,31 @@ class _ReedSolomonGenerator(object):
 		# drop the highest term, and store the rest of the coefficients in order of descending powers.
 		# Note that r = 0x02, which is a generator element of this field GF(2^8/0x11D).
 		root = 1
-		for i in range(degree):
+		for _ in range(degree):  # Unused variable i
 			# Multiply the current product by (x - r^i)
 			for j in range(degree):
-				self.coefficients[j] = _ReedSolomonGenerator.multiply(self.coefficients[j], root)
+				self.coefficients[j] = _ReedSolomonGenerator._multiply(self.coefficients[j], root)
 				if j + 1 < degree:
 					self.coefficients[j] ^= self.coefficients[j + 1]
-			root = (root << 1) ^ ((root >> 7) * 0x11D)  # Multiply by 0x02 mod GF(2^8/0x11D)
+			root = _ReedSolomonGenerator._multiply(root, 0x02)
 	
 	
 	def get_remainder(self, data):
-		"""Computes and returns the Reed-Solomon error correction codewords for the given sequence of data codewords.
-		The returned object is always a new byte list. This method does not alter this object's state (because it is immutable)."""
+		"""Computes and returns the Reed-Solomon error correction codewords for the given
+		sequence of data codewords. The returned object is always a new byte list.
+		This method does not alter this object's state (because it is immutable)."""
 		# Compute the remainder by performing polynomial division
 		result = [0] * len(self.coefficients)
 		for b in data:
-			factor = (b ^ result[0])
-			del result[0]
+			factor = b ^ result.pop(0)
 			result.append(0)
 			for i in range(len(result)):
-				result[i] ^= _ReedSolomonGenerator.multiply(self.coefficients[i], factor)
+				result[i] ^= _ReedSolomonGenerator._multiply(self.coefficients[i], factor)
 		return result
 	
 	
 	@staticmethod
-	def multiply(x, y):
+	def _multiply(x, y):
 		"""Returns the product of the two given field elements modulo GF(2^8/0x11D). The arguments and result
 		are unsigned 8-bit integers. This could be implemented as a lookup table of 256*256 entries of uint8."""
 		if x >> 8 != 0 or y >> 8 != 0:
@@ -807,37 +817,25 @@ class _ReedSolomonGenerator(object):
 
 
 
-class _BitBuffer(object):
-	"""An appendable sequence of bits. Bits are packed in big endian within a byte."""
-	
-	def __init__(self):
-		"""Creates an empty bit buffer (length 0)."""
-		self.data = []
-	
-	def bit_length(self):
-		"""Returns the number of bits in the buffer, which is a non-negative value."""
-		return len(self.data)
-	
-	def get_bits(self):
-		"""Returns a copy of all bits."""
-		return list(self.data)
+class _BitBuffer(list):
+	"""An appendable sequence of bits (0's and 1's)."""
 	
 	def get_bytes(self):
-		"""Returns a copy of all bytes, padding up to the nearest byte."""
-		result = [0] * ((len(self.data) + 7) // 8)
-		for (i, bit) in enumerate(self.data):
+		"""Packs this buffer's bits into bytes in big endian,
+		padding with '0' bit values, and returns the new list."""
+		result = [0] * ((len(self) + 7) // 8)
+		for (i, bit) in enumerate(self):
 			result[i >> 3] |= bit << (7 - (i & 7))
 		return result
 	
 	def append_bits(self, val, n):
-		"""Appends the given number of bits of the given value to this sequence. This requires 0 <= val < 2^n."""
-		if n < 0 or not 0 <= val < (1 << n):
+		"""Appends the given number of low bits of the given value
+		to this sequence. Requires 0 <= val < 2^n."""
+		if n < 0 or val >> n != 0:
 			raise ValueError("Value out of range")
-		for i in reversed(range(n)):  # Append bit by bit
-			self.data.append((val >> i) & 1)
-	
-	def append_all(self, seg):
-		"""Appends the data of the given segment to this bit buffer."""
-		if not isinstance(seg, QrSegment):
-			raise TypeError("QrSegment expected")
-		self.data.extend(seg.get_bits())
+		self.extend(((val >> i) & 1) for i in reversed(range(n)))
+
+
+def _get_bit(x, i):
+	"""Returns true iff the i'th bit of x is set to 1."""
+	return (x >> i) & 1 != 0

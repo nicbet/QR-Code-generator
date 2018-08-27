@@ -23,27 +23,30 @@
 
 package io.nayuki.qrcodegen;
 
-import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Objects;
 
 
 /**
- * An appendable sequence of bits. Bits are packed in big endian within a byte.
+ * An appendable sequence of bits (0's and 1's).
  */
-final class BitBuffer {
+public final class BitBuffer implements Cloneable {
 	
 	/*---- Fields ----*/
 	
-	private byte[] data;
-	private int bitLength;
+	private BitSet data;
+	
+	private int bitLength;  // Non-negative
 	
 	
 	
 	/*---- Constructor ----*/
 	
-	// Creates an empty bit buffer (length 0).
+	/**
+	 * Constructs an empty bit buffer (length 0).
+	 */
 	public BitBuffer() {
-		data = new byte[16];
+		data = new BitSet();
 		bitLength = 0;
 	}
 	
@@ -51,44 +54,89 @@ final class BitBuffer {
 	
 	/*---- Methods ----*/
 	
-	// Returns the number of bits in the buffer, which is a non-negative value.
+	/**
+	 * Returns the length of this sequence, which is a non-negative value.
+	 * @return the length of this sequence
+	 */
 	public int bitLength() {
 		return bitLength;
 	}
 	
 	
-	// Returns a copy of all bytes, padding up to the nearest byte.
+	/**
+	 * Returns the bit at the specified index, yielding 0 or 1.
+	 * @param index the index to get the bit at
+	 * @return the bit at the specified index
+	 * @throws IndexOutOfBoundsException if index &lt; 0 or index &ge; bitLength
+	 */
+	public int getBit(int index) {
+		if (index < 0 || index >= bitLength)
+			throw new IndexOutOfBoundsException();
+		return data.get(index) ? 1 : 0;
+	}
+	
+	
+	/**
+	 * Packs this buffer's bits into bytes in big endian,
+	 * padding with '0' bit values, and returns the new array.
+	 * @return this sequence as a new array of bytes (not {@code null})
+	 */
 	public byte[] getBytes() {
-		return Arrays.copyOf(data, (bitLength + 7) / 8);
-	}
-	
-	
-	// Appends the given number of bits of the given value to this sequence.
-	// If 0 <= len <= 31, then this requires 0 <= val < 2^len.
-	public void appendBits(int val, int len) {
-		if (len < 0 || len > 32 || len < 32 && (val >>> len) != 0)
-			throw new IllegalArgumentException("Value out of range");
-		ensureCapacity(bitLength + len);
-		for (int i = len - 1; i >= 0; i--, bitLength++)  // Append bit by bit
-			data[bitLength >>> 3] |= ((val >>> i) & 1) << (7 - (bitLength & 7));
-	}
-	
-	
-	// Appends the data of the given segment to this bit buffer.
-	public void appendData(QrSegment seg) {
-		Objects.requireNonNull(seg);
-		ensureCapacity(bitLength + seg.bitLength);
-		for (int i = 0; i < seg.bitLength; i++, bitLength++) {  // Append bit by bit
-			int bit = (seg.getByte(i >>> 3) >>> (7 - (i & 7))) & 1;
-			data[bitLength >>> 3] |= bit << (7 - (bitLength & 7));
+		byte[] result = new byte[(bitLength + 7) >>> 3];  // Round up to whole byte, won't overflow
+		for (int i = 0; i < bitLength; i++) {
+			if (data.get(i))
+				result[i >>> 3] |= 1 << (7 - (i & 7));
 		}
+		return result;
 	}
 	
 	
-	// Expands the buffer if necessary, so that it can hold at least the given bit length.
-	private void ensureCapacity(int newBitLen) {
-		while (data.length * 8 < newBitLen)
-			data = Arrays.copyOf(data, data.length * 2);
+	/**
+	 * Appends the specified number of low bits of the specified value
+	 * to this sequence. Requires 0 &le; val &lt; 2<sup>len</sup>.
+	 * @param val the value to append
+	 * @param len the number of low bits in the value to take
+	 * @throws IllegalStateException if appending the data
+	 * would make bitLength exceed Integer.MAX_VALUE
+	 */
+	public void appendBits(int val, int len) {
+		if (len < 0 || len > 31 || val >>> len != 0)
+			throw new IllegalArgumentException("Value out of range");
+		if (Integer.MAX_VALUE - bitLength < len)
+			throw new IllegalStateException("Maximum length reached");
+		for (int i = len - 1; i >= 0; i--, bitLength++)  // Append bit by bit
+			data.set(bitLength, QrCode.getBit(val, i));
+	}
+	
+	
+	/**
+	 * Appends the specified bit buffer to this bit buffer.
+	 * @param bb the bit buffer whose data to append (not {@code null})
+	 * @throws NullPointerException if the bit buffer is {@code null}
+	 * @throws IllegalStateException if appending the data
+	 * would make bitLength exceed Integer.MAX_VALUE
+	 */
+	public void appendData(BitBuffer bb) {
+		Objects.requireNonNull(bb);
+		if (Integer.MAX_VALUE - bitLength < bb.bitLength)
+			throw new IllegalStateException("Maximum length reached");
+		for (int i = 0; i < bb.bitLength; i++, bitLength++)  // Append bit by bit
+			data.set(bitLength, bb.data.get(i));
+	}
+	
+	
+	/**
+	 * Returns a copy of this bit buffer object.
+	 * @return a copy of this bit buffer object
+	 */
+	public BitBuffer clone() {
+		try {
+			BitBuffer result = (BitBuffer)super.clone();
+			result.data = (BitSet)result.data.clone();
+			return result;
+		} catch (CloneNotSupportedException e) {
+			throw new AssertionError(e);
+		}
 	}
 	
 }

@@ -24,23 +24,44 @@
 #   Software.
 # 
 
-from __future__ import print_function
-import itertools, random, subprocess, sys
+import itertools, random, subprocess, sys, time
 if sys.version_info.major < 3:
 	raise RuntimeError("Requires Python 3+")
 
 
 CHILD_PROGRAMS = [
-	["python", "qrcodegen-worker.py"],  # Python program
-	["java", "io/nayuki/qrcodegen/QrCodeGeneratorWorker"],  # Java program
-	["./qrcodegen-worker"],  # C program
-	["./QrCodeGeneratorWorker"],  # C++ program
+	["python2", "../python/qrcodegen-worker.py"],  # Python 2 program
+	["python3", "../python/qrcodegen-worker.py"],  # Python 3 program
+	["java", "-cp", "../java", "-ea:io.nayuki.qrcodegen...", "io/nayuki/qrcodegen/QrCodeGeneratorWorker"],  # Java program
+	["../c/qrcodegen-worker"],  # C program
+	["../cpp/QrCodeGeneratorWorker"],  # C++ program
+	["../rust/target/debug/examples/qrcodegen-worker"],  # Rust program
 ]
 
 
+subprocs = []
+
 def main():
+	# Launch workers
 	global subprocs
-	subprocs = [subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True) for args in CHILD_PROGRAMS]
+	try:
+		for args in CHILD_PROGRAMS:
+			subprocs.append(subprocess.Popen(args, universal_newlines=True,
+				stdin=subprocess.PIPE, stdout=subprocess.PIPE))
+	except FileNotFoundError:
+		write_all(-1)
+		raise
+	
+	# Check if any died
+	time.sleep(0.3)
+	if any(proc.poll() is not None for proc in subprocs):
+		for proc in subprocs:
+			if proc.poll() is None:
+				print(-1, file=proc.stdin)
+				proc.stdin.flush()
+		sys.exit("Error: One or more workers failed to start")
+	
+	# Do tests
 	for i in itertools.count():
 		print("Trial {}: ".format(i), end="")
 		do_trial()
@@ -50,16 +71,16 @@ def main():
 def do_trial():
 	mode = random.randrange(4)
 	if mode == 0:  # Numeric
-		length = max(round((2 * 7089) ** random.random()), 1)
+		length = round((2 * 7089) ** random.random())
 		data = [random.randrange(48, 58) for _ in range(length)]
 	elif mode == 1:  # Alphanumeric
-		length = max(round((2 * 4296) ** random.random()), 1)
+		length = round((2 * 4296) ** random.random())
 		data = [ord(random.choice("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:")) for _ in range(length)]
 	elif mode == 2:  # ASCII
-		length = max(round((2 * 2953) ** random.random()), 1)
+		length = round((2 * 2953) ** random.random())
 		data = [random.randrange(128) for _ in range(length)]
 	elif mode == 3:  # Byte
-		length = max(round((2 * 2953) ** random.random()), 1)
+		length = round((2 * 2953) ** random.random())
 		data = [random.randrange(256) for _ in range(length)]
 	else:
 		raise AssertionError()

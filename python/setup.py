@@ -27,7 +27,7 @@ import setuptools
 setuptools.setup(
 	name = "qrcodegen",
 	description = "High quality QR Code generator library for Python 2 and 3",
-	version = "1.0.1",
+	version = "1.2.0",
 	platforms = "OS Independent",
 	license = "MIT License",
 	
@@ -66,7 +66,7 @@ Features
 
 Core features:
 
-* Available in 5 programming languages, all with nearly equal functionality: Java, JavaScript, Python, C++, C
+* Available in 7 programming languages, all with nearly equal functionality: Java, JavaScript, TypeScript, Python, C++, C, Rust
 * Significantly shorter code but more documentation comments compared to competing libraries
 * Supports encoding all 40 versions (sizes) and all 4 error correction levels, as per the QR Code Model 2 standard
 * Output formats: Raw modules/pixels of the QR symbol, SVG XML string
@@ -78,6 +78,7 @@ Manual parameters:
 * User can specify minimum and maximum version numbers allowed, then library will automatically choose smallest version in the range that fits the data
 * User can specify mask pattern manually, otherwise library will automatically evaluate all 8 masks and select the optimal one
 * User can specify absolute error correction level, or allow the library to boost it if it doesn't increase the version number
+* User can create a list of data segments manually and add ECI segments
 
 
 Usage
@@ -96,11 +97,9 @@ Examples:
     # Manual operation
     segs = QrSegment.make_segments("3141592653589793238462643383")
     qr1 = QrCode.encode_segments(segs, QrCode.Ecc.HIGH, 5, 5, 2, False)
-    border = 4
-    for y in range(-border, qr1.get_size() + border):
-        for x in range(-border, qr1.get_size() + border):
-            color = qr1.get_module(x, y)  # 0 for white, 1 for black
-            # (... paint the module onto pixels ...)
+    for y in range(qr1.get_size()):
+        for x in range(qr1.get_size()):
+            (... paint qr1.get_module(x, y) ...)
 
 More complete set of examples: https://github.com/nayuki/QR-Code-generator/blob/master/python/qrcodegen-demo.py .
 

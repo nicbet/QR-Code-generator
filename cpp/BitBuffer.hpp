@@ -25,22 +25,14 @@
 
 #include <cstdint>
 #include <vector>
-#include "QrSegment.hpp"
 
 
 namespace qrcodegen {
 
 /* 
- * An appendable sequence of bits. Bits are packed in big endian within a byte.
+ * An appendable sequence of bits (0's and 1's).
  */
-class BitBuffer final {
-	
-	/*---- Fields ----*/
-	
-	private: std::vector<uint8_t> data;
-	private: int bitLength;
-	
-	
+class BitBuffer final : public std::vector<bool> {
 	
 	/*---- Constructor ----*/
 	
@@ -51,21 +43,14 @@ class BitBuffer final {
 	
 	/*---- Methods ----*/
 	
-	// Returns the number of bits in the buffer, which is a non-negative value.
-	public: int getBitLength() const;
+	// Packs this buffer's bits into bytes in big endian,
+	// padding with '0' bit values, and returns the new vector.
+	public: std::vector<std::uint8_t> getBytes() const;
 	
 	
-	// Returns a copy of all bytes, padding up to the nearest byte.
-	public: std::vector<uint8_t> getBytes() const;
-	
-	
-	// Appends the given number of bits of the given value to this sequence.
-	// If 0 <= len <= 31, then this requires 0 <= val < 2^len.
-	public: void appendBits(uint32_t val, int len);
-	
-	
-	// Appends the data of the given segment to this bit buffer.
-	public: void appendData(const QrSegment &seg);
+	// Appends the given number of low bits of the given value
+	// to this sequence. Requires 0 <= val < 2^len.
+	public: void appendBits(std::uint32_t val, int len);
 	
 };
 

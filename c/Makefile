@@ -52,18 +52,23 @@ CFLAGS += -O1
 # ---- Targets to build ----
 
 LIBSRC = qrcodegen
+LIBFILE = libqrcodegen.so
 MAINS = qrcodegen-demo qrcodegen-test qrcodegen-worker
 
 # Build all binaries
-all: $(MAINS)
+all: $(LIBFILE) $(MAINS)
 
 # Delete build output
 clean:
-	rm -f -- $(MAINS)
+	rm -f -- $(LIBFILE) $(MAINS)
+
+# Shared library
+$(LIBFILE): $(LIBSRC:=.c) $(LIBSRC:=.h)
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ $(LIBSRC:=.c)
 
 # Executable files
-%: %.c $(LIBSRC:=.c) $(LIBSRC:=.h)
-	$(CC) $(CFLAGS) -o $@ $< $(LIBSRC:=.c)
+%: %.c $(LIBFILE)
+	$(CC) $(CFLAGS) -o $@ $^
 
 # Special executable
 qrcodegen-test: qrcodegen-test.c $(LIBSRC:=.c) $(LIBSRC:=.h)

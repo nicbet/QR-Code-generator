@@ -113,9 +113,9 @@ public final class QrSegmentAdvanced {
 				result[2][j] = result[2][i] + 20;  // 3.33 bits per digit
 			
 			// Switch modes, rounding up fractional bits
-			result[0][j] = Math.min((Math.min(result[1][j], result[2][j]) + 5) / 6 * 6 + bytesCost  , result[0][j]);
-			result[1][j] = Math.min((Math.min(result[2][j], result[0][j]) + 5) / 6 * 6 + alphnumCost, result[1][j]);
-			result[2][j] = Math.min((Math.min(result[0][j], result[1][j]) + 5) / 6 * 6 + numberCost , result[2][j]);
+			result[0][j] = Math.min(roundUp6(Math.min(result[1][j], result[2][j])) + bytesCost  , result[0][j]);
+			result[1][j] = Math.min(roundUp6(Math.min(result[2][j], result[0][j])) + alphnumCost, result[1][j]);
+			result[2][j] = Math.min(roundUp6(Math.min(result[0][j], result[1][j])) + numberCost , result[2][j]);
 		}
 		return result;
 	}
@@ -147,21 +147,21 @@ public final class QrSegmentAdvanced {
 			if (curMode == NUMERIC) {
 				if (isNumeric(c))
 					curMode = NUMERIC;
-				else if (isAlphanumeric(c) && (bitCosts[1][i] + 33 + 5) / 6 * 6 + numberCost == bitCosts[2][i + 1])
+				else if (isAlphanumeric(c) && roundUp6(bitCosts[1][i] + 33) + numberCost == bitCosts[2][i + 1])
 					curMode = ALPHANUMERIC;
 				else
 					curMode = BYTE;
 			} else if (curMode == ALPHANUMERIC) {
-				if (isNumeric(c) && (bitCosts[2][i] + 20 + 5) / 6 * 6 + alphnumCost == bitCosts[1][i + 1])
+				if (isNumeric(c) && roundUp6(bitCosts[2][i] + 20) + alphnumCost == bitCosts[1][i + 1])
 					curMode = NUMERIC;
 				else if (isAlphanumeric(c))
 					curMode = ALPHANUMERIC;
 				else
 					curMode = BYTE;
 			} else if (curMode == BYTE) {
-				if (isNumeric(c) && (bitCosts[2][i] + 20 + 5) / 6 * 6 + bytesCost == bitCosts[0][i + 1])
+				if (isNumeric(c) && roundUp6(bitCosts[2][i] + 20) + bytesCost == bitCosts[0][i + 1])
 					curMode = NUMERIC;
-				else if (isAlphanumeric(c) && (bitCosts[1][i] + 33 + 5) / 6 * 6 + bytesCost == bitCosts[0][i + 1])
+				else if (isAlphanumeric(c) && roundUp6(bitCosts[1][i] + 33) + bytesCost == bitCosts[0][i + 1])
 					curMode = ALPHANUMERIC;
 				else
 					curMode = BYTE;
@@ -181,37 +181,25 @@ public final class QrSegmentAdvanced {
 		// Accumulate run of modes
 		QrSegment.Mode curMode = charModes[0];
 		int start = 0;
-		for (int i = 1; i < data.length; i++) {
-			if (charModes[i] != curMode) {
-				if (curMode == BYTE)
-					result.add(QrSegment.makeBytes(Arrays.copyOfRange(data, start, i)));
-				else {
-					String temp = new String(data, start, i - start, StandardCharsets.US_ASCII);
-					if (curMode == NUMERIC)
-						result.add(QrSegment.makeNumeric(temp));
-					else if (curMode == ALPHANUMERIC)
-						result.add(QrSegment.makeAlphanumeric(temp));
-					else
-						throw new AssertionError();
-				}
-				curMode = charModes[i];
-				start = i;
+		for (int i = 1; ; i++) {
+			if (i < data.length && charModes[i] == curMode)
+				continue;
+			if (curMode == BYTE)
+				result.add(QrSegment.makeBytes(Arrays.copyOfRange(data, start, i)));
+			else {
+				String temp = new String(data, start, i - start, StandardCharsets.US_ASCII);
+				if (curMode == NUMERIC)
+					result.add(QrSegment.makeNumeric(temp));
+				else if (curMode == ALPHANUMERIC)
+					result.add(QrSegment.makeAlphanumeric(temp));
+				else
+					throw new AssertionError();
 			}
+			if (i >= data.length)
+				return result;
+			curMode = charModes[i];
+			start = i;
 		}
-		
-		// Final segment
-		if (curMode == BYTE)
-			result.add(QrSegment.makeBytes(Arrays.copyOfRange(data, start, data.length)));
-		else {
-			String temp = new String(data, start, data.length - start, StandardCharsets.US_ASCII);
-			if (curMode == NUMERIC)
-				result.add(QrSegment.makeNumeric(temp));
-			else if (curMode == ALPHANUMERIC)
-				result.add(QrSegment.makeAlphanumeric(temp));
-			else
-				throw new AssertionError();
-		}
-		return result;
 	}
 	
 	
@@ -224,20 +212,26 @@ public final class QrSegmentAdvanced {
 	}
 	
 	
+	private static int roundUp6(int x) {
+		return (x + 5) / 6 * 6;
+	}
+	
+	
+	
 	/*---- Kanji mode segment encoder ----*/
 	
 	/**
 	 * Returns a segment representing the specified string encoded in kanji mode.
-	 * <p>Note that broadly speaking, the set of encodable characters are {kanji used in Japan, hiragana, katakana,
-	 * Asian punctuation, full-width ASCII}.<br/>
-	 * In particular, non-encodable characters are {normal ASCII, half-width katakana, more extensive Chinese hanzi}.
+	 * <p>Note that broadly speaking, the set of encodable characters are {kanji used in Japan,
+	 * hiragana, katakana, East Asian punctuation, full-width ASCII, Greek, Cyrillic}.<br/>
+	 * Examples of non-encodable characters include {normal ASCII, half-width katakana, more extensive Chinese hanzi}.
 	 * @param text the text to be encoded, which must fall in the kanji mode subset of characters
 	 * @return a segment containing the data
 	 * @throws NullPointerException if the string is {@code null}
 	 * @throws IllegalArgumentException if the string contains non-kanji-mode characters
 	 * @see #isEncodableAsKanji(String)
 	 */
-	public static QrSegment makeKanjiSegment(String text) {
+	public static QrSegment makeKanji(String text) {
 		Objects.requireNonNull(text);
 		BitBuffer bb = new BitBuffer();
 		for (int i = 0; i < text.length(); i++) {
@@ -246,19 +240,19 @@ public final class QrSegmentAdvanced {
 				throw new IllegalArgumentException("String contains non-kanji-mode characters");
 			bb.appendBits(val, 13);
 		}
-		return new QrSegment(QrSegment.Mode.KANJI, text.length(), bb.getBytes(), bb.bitLength());
+		return new QrSegment(QrSegment.Mode.KANJI, text.length(), bb);
 	}
 	
 	
 	/**
 	 * Tests whether the specified text string can be encoded as a segment in kanji mode.
-	 * <p>Note that broadly speaking, the set of encodable characters are {kanji used in Japan, hiragana, katakana,
-	 * Asian punctuation, full-width ASCII}.<br/>
-	 * In particular, non-encodable characters are {normal ASCII, half-width katakana, more extensive Chinese hanzi}.
+	 * <p>Note that broadly speaking, the set of encodable characters are {kanji used in Japan,
+	 * hiragana, katakana, East Asian punctuation, full-width ASCII, Greek, Cyrillic}.<br/>
+	 * Examples of non-encodable characters include {normal ASCII, half-width katakana, more extensive Chinese hanzi}.
 	 * @param text the string to test for encodability
 	 * @return {@code true} if and only if the string can be encoded in kanji mode
 	 * @throws NullPointerException if the string is {@code null}
-	 * @see #makeKanjiSegment(String)
+	 * @see #makeKanji(String)
 	 */
 	public static boolean isEncodableAsKanji(String text) {
 		Objects.requireNonNull(text);
@@ -384,18 +378,17 @@ public final class QrSegmentAdvanced {
 		"/////////////////////////////////////////////w==";
 	
 	
-	private static short[] UNICODE_TO_QR_KANJI = new short[65536];
+	private static short[] UNICODE_TO_QR_KANJI = new short[1 << 16];
 	
 	static {  // Unpack the Shift JIS table into a more computation-friendly form
 		Arrays.fill(UNICODE_TO_QR_KANJI, (short)-1);
 		byte[] bytes = Base64.getDecoder().decode(PACKED_QR_KANJI_TO_UNICODE);
 		for (int i = 0; i < bytes.length; i += 2) {
-			int j = ((bytes[i] & 0xFF) << 8) | (bytes[i + 1] & 0xFF);
-			if (j == 0xFFFF)
+			char c = (char)(((bytes[i] & 0xFF) << 8) | (bytes[i + 1] & 0xFF));
+			if (c == 0xFFFF)
 				continue;
-			if (UNICODE_TO_QR_KANJI[j] != -1)
-				throw new AssertionError();
-			UNICODE_TO_QR_KANJI[j] = (short)(i / 2);
+			assert UNICODE_TO_QR_KANJI[c] == -1;
+			UNICODE_TO_QR_KANJI[c] = (short)(i / 2);
 		}
 	}
 	

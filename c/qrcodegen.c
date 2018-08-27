@@ -23,37 +23,50 @@
 
 #include <assert.h>
 #include <limits.h>
-#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include "qrcodegen.h"
 
-#ifdef QRCODEGEN_TEST
-	#define testable  // Expose private functions
-#else
+#ifndef QRCODEGEN_TEST
 	#define testable static  // Keep functions private
+#else
+	// Expose private functions
+	#ifndef __cplusplus
+		#define testable
+	#else
+		// Needed for const variables because they are treated as implicitly 'static' in C++
+		#define testable extern
+	#endif
 #endif
 
 
 /*---- Forward declarations for private functions ----*/
 
-// Note: All public and private functions defined in this source file are "pure", in the sense that
-// they take input data only from arguments, return output data or store in pointer arguments,
-// perform no I/O (e.g. reading clock or writing to console), and don't read/write global variables.
-// Also, each of these functions allocate only a small constant amount of memory on the stack,
-// they don't allocate or free anything on the heap, and they are thread-safe.
+// Regarding all public and private functions defined in this source file:
+// - They require all pointer/array arguments to be not null.
+// - They only read input scalar/array arguments, write to output pointer/array
+//   arguments, and return scalar values; they are "pure" functions.
+// - They don't read mutable global variables or write to any global variables.
+// - They don't perform I/O, read the clock, print to console, etc.
+// - They allocate a small and constant amount of stack memory.
+// - They don't allocate or free any memory on the heap.
+// - They don't recurse or mutually recurse. All the code
+//   could be inlined into the top-level public functions.
+// - They run in at most quadratic time with respect to input arguments.
+//   Most functions run in linear time, and some in constant time.
+//   There are no unbounded loops or non-obvious termination conditions.
+// - They are completely thread-safe if the caller does not give the
+//   same writable buffer to concurrent calls to these functions.
 
-testable int getTextProperties(const char *text, bool *isNumeric, bool *isAlphanumeric, int *textBits);
-static int fitVersionToData(int minVersion, int maxVersion, enum qrcodegen_Ecc ecl, int dataLen, int dataBitLen, int ver1To9LenBits, int ver10To26LenBits, int ver27To40LenBits);
-static void encodeQrCodeTail(uint8_t dataAndQrcode[], int bitLen, uint8_t tempBuffer[], int version, enum qrcodegen_Ecc ecl, enum qrcodegen_Mask mask, bool boostEcl);
-static void appendBitsToBuffer(unsigned int val, int numBits, uint8_t buffer[], int *bitLen);
+testable void appendBitsToBuffer(unsigned int val, int numBits, uint8_t buffer[], int *bitLen);
 
-static void appendErrorCorrection(uint8_t data[], int version, enum qrcodegen_Ecc ecl, uint8_t result[]);
+testable void addEccAndInterleave(uint8_t data[], int version, enum qrcodegen_Ecc ecl, uint8_t result[]);
 testable int getNumDataCodewords(int version, enum qrcodegen_Ecc ecl);
 testable int getNumRawDataModules(int version);
 
 testable void calcReedSolomonGenerator(int degree, uint8_t result[]);
-testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen, const uint8_t generator[], int degree, uint8_t result[]);
+testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen,
+	const uint8_t generator[], int degree, uint8_t result[]);
 testable uint8_t finiteFieldMultiply(uint8_t x, uint8_t y);
 
 testable void initializeFunctionModules(int version, uint8_t qrcode[]);
@@ -69,6 +82,11 @@ static long getPenaltyScore(const uint8_t qrcode[]);
 testable bool getModule(const uint8_t qrcode[], int x, int y);
 testable void setModule(uint8_t qrcode[], int x, int y, bool isBlack);
 testable void setModuleBounded(uint8_t qrcode[], int x, int y, bool isBlack);
+static bool getBit(int x, int i);
+
+testable int calcSegmentBitLength(enum qrcodegen_Mode mode, size_t numChars);
+testable int getTotalBits(const struct qrcodegen_Segment segs[], size_t len, int version);
+static int numCharCountBits(enum qrcodegen_Mode mode, int version);
 
 
 
@@ -78,7 +96,7 @@ testable void setModuleBounded(uint8_t qrcode[], int x, int y, bool isBlack);
 static const char *ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
 
 // For generating error correction codes.
-static const int8_t ECC_CODEWORDS_PER_BLOCK[4][41] = {
+testable const int8_t ECC_CODEWORDS_PER_BLOCK[4][41] = {
 	// Version: (note that index 0 is for padding, and is set to an illegal value)
 	//0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40    Error correction level
 	{-1,  7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30},  // Low
@@ -88,7 +106,7 @@ static const int8_t ECC_CODEWORDS_PER_BLOCK[4][41] = {
 };
 
 // For generating error correction codes.
-const int8_t NUM_ERROR_CORRECTION_BLOCKS[4][41] = {
+testable const int8_t NUM_ERROR_CORRECTION_BLOCKS[4][41] = {
 	// Version: (note that index 0 is for padding, and is set to an illegal value)
 	//0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40    Error correction level
 	{-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4,  4,  4,  4,  4,  6,  6,  6,  6,  7,  8,  8,  9,  9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25},  // Low
@@ -110,75 +128,37 @@ static const int PENALTY_N4 = 10;
 // Public function - see documentation comment in header file.
 bool qrcodegen_encodeText(const char *text, uint8_t tempBuffer[], uint8_t qrcode[],
 		enum qrcodegen_Ecc ecl, int minVersion, int maxVersion, enum qrcodegen_Mask mask, bool boostEcl) {
-	assert(qrcodegen_VERSION_MIN <= minVersion && minVersion <= maxVersion && maxVersion <= qrcodegen_VERSION_MAX);
-	assert(0 <= (int)ecl && (int)ecl <= 3 && -1 <= (int)mask && (int)mask <= 7);
 	
-	// Get text properties
-	bool isNumeric, isAlphanumeric;
-	int textBits;
-	int textLen = getTextProperties(text, &isNumeric, &isAlphanumeric, &textBits);
-	if (textLen < 0)
-		goto fail;
+	size_t textLen = strlen(text);
+	if (textLen == 0)
+		return qrcodegen_encodeSegmentsAdvanced(NULL, 0, ecl, minVersion, maxVersion, mask, boostEcl, tempBuffer, qrcode);
+	size_t bufLen = qrcodegen_BUFFER_LEN_FOR_VERSION(maxVersion);
 	
-	if (!isAlphanumeric) {  // Fully handle in binary mode
-		if (textLen > qrcodegen_BUFFER_LEN_FOR_VERSION(maxVersion))
+	struct qrcodegen_Segment seg;
+	if (qrcodegen_isNumeric(text)) {
+		if (qrcodegen_calcSegmentBufferSize(qrcodegen_Mode_NUMERIC, textLen) > bufLen)
 			goto fail;
-		for (int i = 0; i < textLen; i++)
+		seg = qrcodegen_makeNumeric(text, tempBuffer);
+	} else if (qrcodegen_isAlphanumeric(text)) {
+		if (qrcodegen_calcSegmentBufferSize(qrcodegen_Mode_ALPHANUMERIC, textLen) > bufLen)
+			goto fail;
+		seg = qrcodegen_makeAlphanumeric(text, tempBuffer);
+	} else {
+		if (textLen > bufLen)
+			goto fail;
+		for (size_t i = 0; i < textLen; i++)
 			tempBuffer[i] = (uint8_t)text[i];
-		return qrcodegen_encodeBinary(tempBuffer, (size_t)textLen, qrcode, ecl, minVersion, maxVersion, mask, boostEcl);
+		seg.mode = qrcodegen_Mode_BYTE;
+		seg.bitLength = calcSegmentBitLength(seg.mode, textLen);
+		if (seg.bitLength == -1)
+			goto fail;
+		seg.numChars = (int)textLen;
+		seg.data = tempBuffer;
 	}
-	
-	int version = fitVersionToData(minVersion, maxVersion, ecl, textLen, (int)textBits,
-		(isNumeric ? 10 : 9), (isNumeric ? 12 : 11), (isNumeric ? 14 : 13));
-	if (version == 0)
-		goto fail;
-	memset(qrcode, 0, qrcodegen_BUFFER_LEN_FOR_VERSION(version) * sizeof(qrcode[0]));
-	int bitLen = 0;
-	
-	// Make segment header and append data
-	if (isNumeric && textLen > 0) {
-		appendBitsToBuffer(1, 4, qrcode, &bitLen);
-		int lengthBits = version <= 9 ? 10 : (version <= 26 ? 12 : 14);
-		appendBitsToBuffer((unsigned int)textLen, lengthBits, qrcode, &bitLen);
-		int accumData = 0;
-		int accumCount = 0;
-		for (const char *p = text; *p != '\0'; p++) {
-			accumData = accumData * 10 + (*p - '0');
-			accumCount++;
-			if (accumCount == 3) {
-				appendBitsToBuffer(accumData, 10, qrcode, &bitLen);
-				accumData = 0;
-				accumCount = 0;
-			}
-		}
-		if (accumCount > 0)  // 1 or 2 digits remaining
-			appendBitsToBuffer(accumData, accumCount * 3 + 1, qrcode, &bitLen);
-		
-	} else if (isAlphanumeric && textLen > 0) {
-		appendBitsToBuffer(2, 4, qrcode, &bitLen);
-		int lengthBits = version <= 9 ? 9 : (version <= 26 ? 11 : 13);
-		appendBitsToBuffer((unsigned int)textLen, lengthBits, qrcode, &bitLen);
-		int accumData = 0;
-		int accumCount = 0;
-		for (const char *p = text; *p != '\0'; p++) {
-			accumData = accumData * 45 + (strchr(ALPHANUMERIC_CHARSET, *p) - ALPHANUMERIC_CHARSET);
-			accumCount++;
-			if (accumCount == 2) {
-				appendBitsToBuffer(accumData, 11, qrcode, &bitLen);
-				accumData = 0;
-				accumCount = 0;
-			}
-		}
-		if (accumCount > 0)  // 1 character remaining
-			appendBitsToBuffer(accumData, 6, qrcode, &bitLen);
-	}
-	
-	// Make QR Code
-	encodeQrCodeTail(qrcode, bitLen, tempBuffer, version, ecl, mask, boostEcl);
-	return true;
+	return qrcodegen_encodeSegmentsAdvanced(&seg, 1, ecl, minVersion, maxVersion, mask, boostEcl, tempBuffer, qrcode);
 	
 fail:
-	qrcode[0] = 0;  // An invalid size value for safety
+	qrcode[0] = 0;  // Set size to invalid value for safety
 	return false;
 }
 
@@ -186,150 +166,23 @@ fail:
 // Public function - see documentation comment in header file.
 bool qrcodegen_encodeBinary(uint8_t dataAndTemp[], size_t dataLen, uint8_t qrcode[],
 		enum qrcodegen_Ecc ecl, int minVersion, int maxVersion, enum qrcodegen_Mask mask, bool boostEcl) {
-	assert(qrcodegen_VERSION_MIN <= minVersion && minVersion <= maxVersion && maxVersion <= qrcodegen_VERSION_MAX);
-	assert(0 <= (int)ecl && (int)ecl <= 3 && -1 <= (int)mask && (int)mask <= 7);
 	
-	// Check length and find version
-	if (dataLen > INT16_MAX / 8)
-		goto fail;
-	// Now dataLen * 8 <= 32767 <= INT_MAX
-	int version = fitVersionToData(minVersion, maxVersion, ecl, (int)dataLen, (int)dataLen * 8, 8, 16, 16);
-	if (version == 0)
-		goto fail;
-	
-	// Make bit sequence and QR Code
-	memset(qrcode, 0, qrcodegen_BUFFER_LEN_FOR_VERSION(version) * sizeof(qrcode[0]));
-	int bitLen = 0;
-	appendBitsToBuffer(4, 4, qrcode, &bitLen);
-	appendBitsToBuffer((unsigned int)dataLen, (version <= 9 ? 8 : 16), qrcode, &bitLen);
-	for (size_t i = 0; i < dataLen; i++)
-		appendBitsToBuffer(dataAndTemp[i], 8, qrcode, &bitLen);
-	encodeQrCodeTail(qrcode, bitLen, dataAndTemp, version, ecl, mask, boostEcl);
-	return true;
-	
-fail:
-	qrcode[0] = 0;  // An invalid size value for safety
-	return false;
-}
-
-
-// Scans the given string, returns the number of characters, and sets output variables.
-// Returns a negative number if the length would exceed INT16_MAX or textBits would exceed INT_MAX.
-// Note that INT16_MAX <= 32767 <= INT_MAX and INT16_MAX < 65535 <= SIZE_MAX.
-// If the return value is negative, then the pointees of output arguments might not be set.
-testable int getTextProperties(const char *text, bool *isNumeric, bool *isAlphanumeric, int *textBits) {
-	int textLen = 0;
-	*isNumeric = true;
-	*isAlphanumeric = true;
-	for (const char *p = text; *p != '\0'; p++, textLen++) {  // Read every character
-		if (textLen >= INT16_MAX)
-			return -1;
-		char c = *p;
-		if (c < '0' || c > '9') {
-			*isNumeric = false;
-			*isAlphanumeric &= strchr(ALPHANUMERIC_CHARSET, c) != NULL;
-		}
+	struct qrcodegen_Segment seg;
+	seg.mode = qrcodegen_Mode_BYTE;
+	seg.bitLength = calcSegmentBitLength(seg.mode, dataLen);
+	if (seg.bitLength == -1) {
+		qrcode[0] = 0;  // Set size to invalid value for safety
+		return false;
 	}
-	
-	long tempBits;
-	if (*isNumeric)
-		tempBits = textLen * 3L + (textLen + 2L) / 3;
-	else if (*isAlphanumeric)
-		tempBits = textLen * 5L + (textLen + 1L) / 2;
-	else  // Binary mode
-		tempBits = textLen * 8L;
-	
-	if (tempBits > INT_MAX)
-		return -1;
-	*textBits = (int)tempBits;
-	return textLen;
-}
-
-
-// Returns the minimum possible version in the given range to fit one
-// segment with the given characteristics, or 0 if no version fits the data.
-static int fitVersionToData(int minVersion, int maxVersion, enum qrcodegen_Ecc ecl,
-	int dataLen, int dataBitLen, int ver1To9LenBits, int ver10To26LenBits, int ver27To40LenBits) {
-	
-	assert(qrcodegen_VERSION_MIN <= minVersion && minVersion <= maxVersion && maxVersion <= qrcodegen_VERSION_MAX);
-	assert(0 <= (int)ecl && (int)ecl <= 3);
-	assert(dataLen >= 0 && dataBitLen >= 0);
-	assert(1 <= ver1To9LenBits   && ver1To9LenBits   <= 16);
-	assert(1 <= ver10To26LenBits && ver10To26LenBits <= 16);
-	assert(1 <= ver27To40LenBits && ver27To40LenBits <= 16);
-	
-	for (int version = minVersion; ; version++) {
-		int lengthBits;
-		if (version <= 9) lengthBits = ver1To9LenBits;
-		else if (version <= 26) lengthBits = ver10To26LenBits;
-		else lengthBits = ver27To40LenBits;
-		if (dataLen < (1L << lengthBits)) {
-			int dataCapacityBits = getNumDataCodewords(version, ecl) * 8;  // Number of data bits available
-			int header = 4 + lengthBits;
-			if (dataBitLen <= INT_MAX - header && header + dataBitLen <= dataCapacityBits)
-				return version;  // This version number is found to be suitable
-		}
-		if (version >= maxVersion)  // All versions in the range could not fit the given data
-			return 0;
-	}
-}
-
-
-// Given a data bit sequence in dataAndQrcode without terminator or padding or ECC, plus the given QR Code
-// encoding parameters, this function handles ECC level boosting, bit stream termination and padding,
-// ECC computation, and block interleaving. Then the function renders the QR Code symbol back to the array
-// dataAndQrcode and handles automatic mask selection. The initial bit length must fit the given version and
-// ECC level, and each of the two arrays must have length at least qrcodegen_BUFFER_LEN_FOR_VERSION(version).
-static void encodeQrCodeTail(uint8_t dataAndQrcode[], int bitLen, uint8_t tempBuffer[],
-		int version, enum qrcodegen_Ecc ecl, enum qrcodegen_Mask mask, bool boostEcl) {
-	
-	if (boostEcl) {
-		if (bitLen <= getNumDataCodewords(version, qrcodegen_Ecc_MEDIUM  ) * 8) ecl = qrcodegen_Ecc_MEDIUM  ;
-		if (bitLen <= getNumDataCodewords(version, qrcodegen_Ecc_QUARTILE) * 8) ecl = qrcodegen_Ecc_QUARTILE;
-		if (bitLen <= getNumDataCodewords(version, qrcodegen_Ecc_HIGH    ) * 8) ecl = qrcodegen_Ecc_HIGH    ;
-	}
-	int dataCapacityBits = getNumDataCodewords(version, ecl) * 8;
-	
-	// Add terminator, bit padding, byte padding
-	int terminatorBits = dataCapacityBits - bitLen;
-	if (terminatorBits > 4)
-		terminatorBits = 4;
-	appendBitsToBuffer(0, terminatorBits, dataAndQrcode, &bitLen);
-	appendBitsToBuffer(0, (8 - bitLen % 8) % 8, dataAndQrcode, &bitLen);
-	for (uint8_t padByte = 0xEC; bitLen < dataCapacityBits; padByte ^= 0xEC ^ 0x11)
-		appendBitsToBuffer(padByte, 8, dataAndQrcode, &bitLen);
-	assert(bitLen % 8 == 0);
-	
-	// Draw function and data codeword modules
-	appendErrorCorrection(dataAndQrcode, version, ecl, tempBuffer);
-	initializeFunctionModules(version, dataAndQrcode);
-	drawCodewords(tempBuffer, getNumRawDataModules(version) / 8, dataAndQrcode);
-	drawWhiteFunctionModules(dataAndQrcode, version);
-	initializeFunctionModules(version, tempBuffer);
-	
-	// Handle masking
-	if (mask == qrcodegen_Mask_AUTO) {  // Automatically choose best mask
-		long minPenalty = LONG_MAX;
-		for (int i = 0; i < 8; i++) {
-			drawFormatBits(ecl, (enum qrcodegen_Mask)i, dataAndQrcode);
-			applyMask(tempBuffer, dataAndQrcode, (enum qrcodegen_Mask)i);
-			long penalty = getPenaltyScore(dataAndQrcode);
-			if (penalty < minPenalty) {
-				mask = (enum qrcodegen_Mask)i;
-				minPenalty = penalty;
-			}
-			applyMask(tempBuffer, dataAndQrcode, (enum qrcodegen_Mask)i);  // Undoes the mask due to XOR
-		}
-	}
-	assert(0 <= (int)mask && (int)mask <= 7);
-	drawFormatBits(ecl, mask, dataAndQrcode);
-	applyMask(tempBuffer, dataAndQrcode, mask);
+	seg.numChars = (int)dataLen;
+	seg.data = dataAndTemp;
+	return qrcodegen_encodeSegmentsAdvanced(&seg, 1, ecl, minVersion, maxVersion, mask, boostEcl, dataAndTemp, qrcode);
 }
 
 
 // Appends the given sequence of bits to the given byte-based bit buffer, increasing the bit length.
-static void appendBitsToBuffer(unsigned int val, int numBits, uint8_t buffer[], int *bitLen) {
-	assert(0 <= numBits && numBits <= 16 && (long)val >> numBits == 0);
+testable void appendBitsToBuffer(unsigned int val, int numBits, uint8_t buffer[], int *bitLen) {
+	assert(0 <= numBits && numBits <= 16 && (unsigned long)val >> numBits == 0);
 	for (int i = numBits - 1; i >= 0; i--, (*bitLen)++)
 		buffer[*bitLen >> 3] |= ((val >> i) & 1) << (7 - (*bitLen & 7));
 }
@@ -342,7 +195,7 @@ static void appendBitsToBuffer(unsigned int val, int numBits, uint8_t buffer[], 
 // from the blocks and stores them in the result array. data[0 : rawCodewords - totalEcc] contains
 // the input data. data[rawCodewords - totalEcc : rawCodewords] is used as a temporary work area
 // and will be clobbered by this function. The final answer is stored in result[0 : rawCodewords].
-static void appendErrorCorrection(uint8_t data[], int version, enum qrcodegen_Ecc ecl, uint8_t result[]) {
+testable void addEccAndInterleave(uint8_t data[], int version, enum qrcodegen_Ecc ecl, uint8_t result[]) {
 	// Calculate parameter numbers
 	assert(0 <= (int)ecl && (int)ecl < 4 && qrcodegen_VERSION_MIN <= version && version <= qrcodegen_VERSION_MAX);
 	int numBlocks = NUM_ERROR_CORRECTION_BLOCKS[(int)ecl][version];
@@ -384,14 +237,15 @@ static void appendErrorCorrection(uint8_t data[], int version, enum qrcodegen_Ec
 // Returns the number of 8-bit codewords that can be used for storing data (not ECC),
 // for the given version number and error correction level. The result is in the range [9, 2956].
 testable int getNumDataCodewords(int version, enum qrcodegen_Ecc ecl) {
-	assert(0 <= (int)ecl && (int)ecl < 4 && qrcodegen_VERSION_MIN <= version && version <= qrcodegen_VERSION_MAX);
-	return getNumRawDataModules(version) / 8 - ECC_CODEWORDS_PER_BLOCK[(int)ecl][version] * NUM_ERROR_CORRECTION_BLOCKS[(int)ecl][version];
+	int v = version, e = (int)ecl;
+	assert(0 <= e && e < 4 && qrcodegen_VERSION_MIN <= v && v <= qrcodegen_VERSION_MAX);
+	return getNumRawDataModules(v) / 8 - ECC_CODEWORDS_PER_BLOCK[e][v] * NUM_ERROR_CORRECTION_BLOCKS[e][v];
 }
 
 
 // Returns the number of data bits that can be stored in a QR Code of the given version number, after
 // all function modules are excluded. This includes remainder bits, so it might not be a multiple of 8.
-// The result is in the range [208, 29648].
+// The result is in the range [208, 29648]. This could be implemented as a 40-entry lookup table.
 testable int getNumRawDataModules(int version) {
 	assert(qrcodegen_VERSION_MIN <= version && version <= qrcodegen_VERSION_MAX);
 	int result = (16 * version + 128) * version + 64;
@@ -418,22 +272,24 @@ testable void calcReedSolomonGenerator(int degree, uint8_t result[]) {
 	// Compute the product polynomial (x - r^0) * (x - r^1) * (x - r^2) * ... * (x - r^{degree-1}),
 	// drop the highest term, and store the rest of the coefficients in order of descending powers.
 	// Note that r = 0x02, which is a generator element of this field GF(2^8/0x11D).
-	int root = 1;
+	uint8_t root = 1;
 	for (int i = 0; i < degree; i++) {
 		// Multiply the current product by (x - r^i)
 		for (int j = 0; j < degree; j++) {
-			result[j] = finiteFieldMultiply(result[j], (uint8_t)root);
+			result[j] = finiteFieldMultiply(result[j], root);
 			if (j + 1 < degree)
 				result[j] ^= result[j + 1];
 		}
-		root = (root << 1) ^ ((root >> 7) * 0x11D);  // Multiply by 0x02 mod GF(2^8/0x11D)
+		root = finiteFieldMultiply(root, 0x02);
 	}
 }
 
 
 // Calculates the remainder of the polynomial data[0 : dataLen] when divided by the generator[0 : degree], where all
 // polynomials are in big endian and the generator has an implicit leading 1 term, storing the result in result[0 : degree].
-testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen, const uint8_t generator[], int degree, uint8_t result[]) {
+testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen,
+		const uint8_t generator[], int degree, uint8_t result[]) {
+	
 	// Perform polynomial division
 	assert(1 <= degree && degree <= 30);
 	memset(result, 0, degree * sizeof(result[0]));
@@ -447,7 +303,8 @@ testable void calcReedSolomonRemainder(const uint8_t data[], int dataLen, const 
 }
 
 
-// Returns the product of the two given field elements modulo GF(2^8/0x11D). All argument values are valid.
+// Returns the product of the two given field elements modulo GF(2^8/0x11D).
+// All inputs are valid. This could be implemented as a 256*256 lookup table.
 testable uint8_t finiteFieldMultiply(uint8_t x, uint8_t y) {
 	// Russian peasant multiplication
 	uint8_t z = 0;
@@ -484,9 +341,8 @@ testable void initializeFunctionModules(int version, uint8_t qrcode[]) {
 	int numAlign = getAlignmentPatternPositions(version, alignPatPos);
 	for (int i = 0; i < numAlign; i++) {
 		for (int j = 0; j < numAlign; j++) {
-			if ((i == 0 && j == 0) || (i == 0 && j == numAlign - 1) || (i == numAlign - 1 && j == 0))
-				continue;  // Skip the three finder corners
-			else
+			// Don't draw on the three finder corners
+			if (!((i == 0 && j == 0) || (i == 0 && j == numAlign - 1) || (i == numAlign - 1 && j == 0)))
 				fillRectangle(alignPatPos[i] - 2, alignPatPos[j] - 2, 5, 5, qrcode);
 		}
 	}
@@ -546,16 +402,16 @@ static void drawWhiteFunctionModules(uint8_t qrcode[], int version) {
 		int rem = version;  // version is uint6, in the range [7, 40]
 		for (int i = 0; i < 12; i++)
 			rem = (rem << 1) ^ ((rem >> 11) * 0x1F25);
-		long data = (long)version << 12 | rem;  // uint18
-		assert(data >> 18 == 0);
+		long bits = (long)version << 12 | rem;  // uint18
+		assert(bits >> 18 == 0);
 		
 		// Draw two copies
 		for (int i = 0; i < 6; i++) {
 			for (int j = 0; j < 3; j++) {
 				int k = qrsize - 11 + j;
-				setModule(qrcode, k, i, (data & 1) != 0);
-				setModule(qrcode, i, k, (data & 1) != 0);
-				data >>= 1;
+				setModule(qrcode, k, i, (bits & 1) != 0);
+				setModule(qrcode, i, k, (bits & 1) != 0);
+				bits >>= 1;
 			}
 		}
 	}
@@ -568,7 +424,7 @@ static void drawWhiteFunctionModules(uint8_t qrcode[], int version) {
 static void drawFormatBits(enum qrcodegen_Ecc ecl, enum qrcodegen_Mask mask, uint8_t qrcode[]) {
 	// Calculate error correction code and pack bits
 	assert(0 <= (int)mask && (int)mask <= 7);
-	int data;
+	int data = -1;  // Dummy value
 	switch (ecl) {
 		case qrcodegen_Ecc_LOW     :  data = 1;  break;
 		case qrcodegen_Ecc_MEDIUM  :  data = 0;  break;
@@ -580,26 +436,25 @@ static void drawFormatBits(enum qrcodegen_Ecc ecl, enum qrcodegen_Mask mask, uin
 	int rem = data;
 	for (int i = 0; i < 10; i++)
 		rem = (rem << 1) ^ ((rem >> 9) * 0x537);
-	data = data << 10 | rem;
-	data ^= 0x5412;  // uint15
-	assert(data >> 15 == 0);
+	int bits = (data << 10 | rem) ^ 0x5412;  // uint15
+	assert(bits >> 15 == 0);
 	
 	// Draw first copy
 	for (int i = 0; i <= 5; i++)
-		setModule(qrcode, 8, i, ((data >> i) & 1) != 0);
-	setModule(qrcode, 8, 7, ((data >> 6) & 1) != 0);
-	setModule(qrcode, 8, 8, ((data >> 7) & 1) != 0);
-	setModule(qrcode, 7, 8, ((data >> 8) & 1) != 0);
+		setModule(qrcode, 8, i, getBit(bits, i));
+	setModule(qrcode, 8, 7, getBit(bits, 6));
+	setModule(qrcode, 8, 8, getBit(bits, 7));
+	setModule(qrcode, 7, 8, getBit(bits, 8));
 	for (int i = 9; i < 15; i++)
-		setModule(qrcode, 14 - i, 8, ((data >> i) & 1) != 0);
+		setModule(qrcode, 14 - i, 8, getBit(bits, i));
 	
 	// Draw second copy
 	int qrsize = qrcodegen_getSize(qrcode);
 	for (int i = 0; i <= 7; i++)
-		setModule(qrcode, qrsize - 1 - i, 8, ((data >> i) & 1) != 0);
+		setModule(qrcode, qrsize - 1 - i, 8, getBit(bits, i));
 	for (int i = 8; i < 15; i++)
-		setModule(qrcode, 8, qrsize - 15 + i, ((data >> i) & 1) != 0);
-	setModule(qrcode, 8, qrsize - 8, true);
+		setModule(qrcode, 8, qrsize - 15 + i, getBit(bits, i));
+	setModule(qrcode, 8, qrsize - 8, true);  // Always black
 }
 
 
@@ -608,14 +463,10 @@ static void drawFormatBits(enum qrcodegen_Ecc ecl, enum qrcodegen_Mask mask, uin
 testable int getAlignmentPatternPositions(int version, uint8_t result[7]) {
 	if (version == 1)
 		return 0;
-	int qrsize = version * 4 + 17;
 	int numAlign = version / 7 + 2;
-	int step;
-	if (version != 32)
-		step = (version * 4 + numAlign * 2 + 1) / (2 * numAlign - 2) * 2;  // ceil((qrsize - 13) / (2*numAlign - 2)) * 2
-	else  // C-C-C-Combo breaker!
-		step = 26;
-	for (int i = numAlign - 1, pos = qrsize - 7; i >= 1; i--, pos -= step)
+	int step = (version == 32) ? 26 :
+		(version*4 + numAlign*2 + 1) / (numAlign*2 - 2) * 2;
+	for (int i = numAlign - 1, pos = version * 4 + 10; i >= 1; i--, pos -= step)
 		result[i] = pos;
 	result[0] = 6;
 	return numAlign;
@@ -649,7 +500,7 @@ static void drawCodewords(const uint8_t data[], int dataLen, uint8_t qrcode[]) {
 				bool upward = ((right + 1) & 2) == 0;
 				int y = upward ? qrsize - 1 - vert : vert;  // Actual y coordinate
 				if (!getModule(qrcode, x, y) && i < dataLen * 8) {
-					bool black = ((data[i >> 3] >> (7 - (i & 7))) & 1) != 0;
+					bool black = getBit(data[i >> 3], 7 - (i & 7));
 					setModule(qrcode, x, y, black);
 					i++;
 				}
@@ -662,10 +513,11 @@ static void drawCodewords(const uint8_t data[], int dataLen, uint8_t qrcode[]) {
 }
 
 
-// XORs the data modules in this QR Code with the given mask pattern. Due to XOR's mathematical
-// properties, calling applyMask(..., m) twice with the same value is equivalent to no change at all.
-// This means it is possible to apply a mask, undo it, and try another mask. Note that a final
-// well-formed QR Code symbol needs exactly one mask applied (not zero, not two, etc.).
+// XORs the codeword modules in this QR Code with the given mask pattern.
+// The function modules must be marked and the codeword bits must be drawn
+// before masking. Due to the arithmetic of XOR, calling applyMask() with
+// the same mask value a second time will undo the mask. A final well-formed
+// QR Code symbol needs exactly one (not zero, two, etc.) mask applied.
 static void applyMask(const uint8_t functionModules[], uint8_t qrcode[], enum qrcodegen_Mask mask) {
 	assert(0 <= (int)mask && (int)mask <= 7);  // Disallows qrcodegen_Mask_AUTO
 	int qrsize = qrcodegen_getSize(qrcode);
@@ -673,7 +525,7 @@ static void applyMask(const uint8_t functionModules[], uint8_t qrcode[], enum qr
 		for (int x = 0; x < qrsize; x++) {
 			if (getModule(functionModules, x, y))
 				continue;
-			bool invert;
+			bool invert = false;  // Dummy value
 			switch ((int)mask) {
 				case 0:  invert = (x + y) % 2 == 0;                    break;
 				case 1:  invert = y % 2 == 0;                          break;
@@ -700,9 +552,9 @@ static long getPenaltyScore(const uint8_t qrcode[]) {
 	
 	// Adjacent modules in row having same color
 	for (int y = 0; y < qrsize; y++) {
-		bool colorX = getModule(qrcode, 0, y);
-		for (int x = 1, runX = 1; x < qrsize; x++) {
-			if (getModule(qrcode, x, y) != colorX) {
+		bool colorX = false;
+		for (int x = 0, runX = -1; x < qrsize; x++) {
+			if (x == 0 || getModule(qrcode, x, y) != colorX) {
 				colorX = getModule(qrcode, x, y);
 				runX = 1;
 			} else {
@@ -716,9 +568,9 @@ static long getPenaltyScore(const uint8_t qrcode[]) {
 	}
 	// Adjacent modules in column having same color
 	for (int x = 0; x < qrsize; x++) {
-		bool colorY = getModule(qrcode, x, 0);
-		for (int y = 1, runY = 1; y < qrsize; y++) {
-			if (getModule(qrcode, x, y) != colorY) {
+		bool colorY = false;
+		for (int y = 0, runY = -1; y < qrsize; y++) {
+			if (y == 0 || getModule(qrcode, x, y) != colorY) {
 				colorY = getModule(qrcode, x, y);
 				runY = 1;
 			} else {
@@ -767,10 +619,10 @@ static long getPenaltyScore(const uint8_t qrcode[]) {
 				black++;
 		}
 	}
-	int total = qrsize * qrsize;
-	// Find smallest k such that (45-5k)% <= dark/total <= (55+5k)%
-	for (int k = 0; black*20L < (9L-k)*total || black*20L > (11L+k)*total; k++)
-		result += PENALTY_N4;
+	int total = qrsize * qrsize;  // Note that size is odd, so black/total != 1/2
+	// Compute the smallest integer k >= 0 such that (45-5k)% <= black/total <= (55+5k)%
+	int k = (int)((labs(black * 20L - total * 10L) + total - 1) / total) - 1;
+	result += k * PENALTY_N4;
 	return result;
 }
 
@@ -780,6 +632,7 @@ static long getPenaltyScore(const uint8_t qrcode[]) {
 
 // Public function - see documentation comment in header file.
 int qrcodegen_getSize(const uint8_t qrcode[]) {
+	assert(qrcode != NULL);
 	int result = qrcode[0];
 	assert((qrcodegen_VERSION_MIN * 4 + 17) <= result
 		&& result <= (qrcodegen_VERSION_MAX * 4 + 17));
@@ -789,6 +642,7 @@ int qrcodegen_getSize(const uint8_t qrcode[]) {
 
 // Public function - see documentation comment in header file.
 bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y) {
+	assert(qrcode != NULL);
 	int qrsize = qrcode[0];
 	return (0 <= x && x < qrsize && 0 <= y && y < qrsize) && getModule(qrcode, x, y);
 }
@@ -799,9 +653,7 @@ testable bool getModule(const uint8_t qrcode[], int x, int y) {
 	int qrsize = qrcode[0];
 	assert(21 <= qrsize && qrsize <= 177 && 0 <= x && x < qrsize && 0 <= y && y < qrsize);
 	int index = y * qrsize + x;
-	int bitIndex = index & 7;
-	int byteIndex = (index >> 3) + 1;
-	return ((qrcode[byteIndex] >> bitIndex) & 1) != 0;
+	return getBit(qrcode[(index >> 3) + 1], index & 7);
 }
 
 
@@ -824,4 +676,350 @@ testable void setModuleBounded(uint8_t qrcode[], int x, int y, bool isBlack) {
 	int qrsize = qrcode[0];
 	if (0 <= x && x < qrsize && 0 <= y && y < qrsize)
 		setModule(qrcode, x, y, isBlack);
+}
+
+
+// Returns true iff the i'th bit of x is set to 1.
+static bool getBit(int x, int i) {
+	return ((x >> i) & 1) != 0;
+}
+
+
+
+/*---- Segment handling ----*/
+
+// Public function - see documentation comment in header file.
+bool qrcodegen_isAlphanumeric(const char *text) {
+	assert(text != NULL);
+	for (; *text != '\0'; text++) {
+		if (strchr(ALPHANUMERIC_CHARSET, *text) == NULL)
+			return false;
+	}
+	return true;
+}
+
+
+// Public function - see documentation comment in header file.
+bool qrcodegen_isNumeric(const char *text) {
+	assert(text != NULL);
+	for (; *text != '\0'; text++) {
+		if (*text < '0' || *text > '9')
+			return false;
+	}
+	return true;
+}
+
+
+// Public function - see documentation comment in header file.
+size_t qrcodegen_calcSegmentBufferSize(enum qrcodegen_Mode mode, size_t numChars) {
+	int temp = calcSegmentBitLength(mode, numChars);
+	if (temp == -1)
+		return SIZE_MAX;
+	assert(0 <= temp && temp <= INT16_MAX);
+	return ((size_t)temp + 7) / 8;
+}
+
+
+// Returns the number of data bits needed to represent a segment
+// containing the given number of characters using the given mode. Notes:
+// - Returns -1 on failure, i.e. numChars > INT16_MAX or
+//   the number of needed bits exceeds INT16_MAX (i.e. 32767).
+// - Otherwise, all valid results are in the range [0, INT16_MAX].
+// - For byte mode, numChars measures the number of bytes, not Unicode code points.
+// - For ECI mode, numChars must be 0, and the worst-case number of bits is returned.
+//   An actual ECI segment can have shorter data. For non-ECI modes, the result is exact.
+testable int calcSegmentBitLength(enum qrcodegen_Mode mode, size_t numChars) {
+	const int LIMIT = INT16_MAX;  // Can be configured as high as INT_MAX
+	if (numChars > (unsigned int)LIMIT)
+		return -1;
+	int n = (int)numChars;
+	
+	int result = -2;
+	if (mode == qrcodegen_Mode_NUMERIC) {
+		// n * 3 + ceil(n / 3)
+		if (n > LIMIT / 3)
+			goto overflow;
+		result = n * 3;
+		int temp = n / 3 + (n % 3 == 0 ? 0 : 1);
+		if (temp > LIMIT - result)
+			goto overflow;
+		result += temp;
+	} else if (mode == qrcodegen_Mode_ALPHANUMERIC) {
+		// n * 5 + ceil(n / 2)
+		if (n > LIMIT / 5)
+			goto overflow;
+		result = n * 5;
+		int temp = n / 2 + n % 2;
+		if (temp > LIMIT - result)
+			goto overflow;
+		result += temp;
+	} else if (mode == qrcodegen_Mode_BYTE) {
+		if (n > LIMIT / 8)
+			goto overflow;
+		result = n * 8;
+	} else if (mode == qrcodegen_Mode_KANJI) {
+		if (n > LIMIT / 13)
+			goto overflow;
+		result = n * 13;
+	} else if (mode == qrcodegen_Mode_ECI && numChars == 0)
+		result = 3 * 8;
+	assert(0 <= result && result <= LIMIT);
+	return result;
+overflow:
+	return -1;
+}
+
+
+// Public function - see documentation comment in header file.
+struct qrcodegen_Segment qrcodegen_makeBytes(const uint8_t data[], size_t len, uint8_t buf[]) {
+	assert(data != NULL || len == 0);
+	struct qrcodegen_Segment result;
+	result.mode = qrcodegen_Mode_BYTE;
+	result.bitLength = calcSegmentBitLength(result.mode, len);
+	assert(result.bitLength != -1);
+	result.numChars = (int)len;
+	if (len > 0)
+		memcpy(buf, data, len * sizeof(buf[0]));
+	result.data = buf;
+	return result;
+}
+
+
+// Public function - see documentation comment in header file.
+struct qrcodegen_Segment qrcodegen_makeNumeric(const char *digits, uint8_t buf[]) {
+	assert(digits != NULL);
+	struct qrcodegen_Segment result;
+	size_t len = strlen(digits);
+	result.mode = qrcodegen_Mode_NUMERIC;
+	int bitLen = calcSegmentBitLength(result.mode, len);
+	assert(bitLen != -1);
+	result.numChars = (int)len;
+	if (bitLen > 0)
+		memset(buf, 0, ((size_t)bitLen + 7) / 8 * sizeof(buf[0]));
+	result.bitLength = 0;
+	
+	unsigned int accumData = 0;
+	int accumCount = 0;
+	for (; *digits != '\0'; digits++) {
+		char c = *digits;
+		assert('0' <= c && c <= '9');
+		accumData = accumData * 10 + (c - '0');
+		accumCount++;
+		if (accumCount == 3) {
+			appendBitsToBuffer(accumData, 10, buf, &result.bitLength);
+			accumData = 0;
+			accumCount = 0;
+		}
+	}
+	if (accumCount > 0)  // 1 or 2 digits remaining
+		appendBitsToBuffer(accumData, accumCount * 3 + 1, buf, &result.bitLength);
+	assert(result.bitLength == bitLen);
+	result.data = buf;
+	return result;
+}
+
+
+// Public function - see documentation comment in header file.
+struct qrcodegen_Segment qrcodegen_makeAlphanumeric(const char *text, uint8_t buf[]) {
+	assert(text != NULL);
+	struct qrcodegen_Segment result;
+	size_t len = strlen(text);
+	result.mode = qrcodegen_Mode_ALPHANUMERIC;
+	int bitLen = calcSegmentBitLength(result.mode, len);
+	assert(bitLen != -1);
+	result.numChars = (int)len;
+	if (bitLen > 0)
+		memset(buf, 0, ((size_t)bitLen + 7) / 8 * sizeof(buf[0]));
+	result.bitLength = 0;
+	
+	unsigned int accumData = 0;
+	int accumCount = 0;
+	for (; *text != '\0'; text++) {
+		const char *temp = strchr(ALPHANUMERIC_CHARSET, *text);
+		assert(temp != NULL);
+		accumData = accumData * 45 + (temp - ALPHANUMERIC_CHARSET);
+		accumCount++;
+		if (accumCount == 2) {
+			appendBitsToBuffer(accumData, 11, buf, &result.bitLength);
+			accumData = 0;
+			accumCount = 0;
+		}
+	}
+	if (accumCount > 0)  // 1 character remaining
+		appendBitsToBuffer(accumData, 6, buf, &result.bitLength);
+	assert(result.bitLength == bitLen);
+	result.data = buf;
+	return result;
+}
+
+
+// Public function - see documentation comment in header file.
+struct qrcodegen_Segment qrcodegen_makeEci(long assignVal, uint8_t buf[]) {
+	struct qrcodegen_Segment result;
+	result.mode = qrcodegen_Mode_ECI;
+	result.numChars = 0;
+	result.bitLength = 0;
+	if (0 <= assignVal && assignVal < (1 << 7)) {
+		memset(buf, 0, 1 * sizeof(buf[0]));
+		appendBitsToBuffer(assignVal, 8, buf, &result.bitLength);
+	} else if ((1 << 7) <= assignVal && assignVal < (1 << 14)) {
+		memset(buf, 0, 2 * sizeof(buf[0]));
+		appendBitsToBuffer(2, 2, buf, &result.bitLength);
+		appendBitsToBuffer(assignVal, 14, buf, &result.bitLength);
+	} else if ((1 << 14) <= assignVal && assignVal < 1000000L) {
+		memset(buf, 0, 3 * sizeof(buf[0]));
+		appendBitsToBuffer(6, 3, buf, &result.bitLength);
+		appendBitsToBuffer(assignVal >> 10, 11, buf, &result.bitLength);
+		appendBitsToBuffer(assignVal & 0x3FF, 10, buf, &result.bitLength);
+	} else
+		assert(false);
+	result.data = buf;
+	return result;
+}
+
+
+// Public function - see documentation comment in header file.
+bool qrcodegen_encodeSegments(const struct qrcodegen_Segment segs[], size_t len,
+		enum qrcodegen_Ecc ecl, uint8_t tempBuffer[], uint8_t qrcode[]) {
+	return qrcodegen_encodeSegmentsAdvanced(segs, len, ecl,
+		qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX, -1, true, tempBuffer, qrcode);
+}
+
+
+// Public function - see documentation comment in header file.
+bool qrcodegen_encodeSegmentsAdvanced(const struct qrcodegen_Segment segs[], size_t len, enum qrcodegen_Ecc ecl,
+		int minVersion, int maxVersion, int mask, bool boostEcl, uint8_t tempBuffer[], uint8_t qrcode[]) {
+	assert(segs != NULL || len == 0);
+	assert(qrcodegen_VERSION_MIN <= minVersion && minVersion <= maxVersion && maxVersion <= qrcodegen_VERSION_MAX);
+	assert(0 <= (int)ecl && (int)ecl <= 3 && -1 <= (int)mask && (int)mask <= 7);
+	
+	// Find the minimal version number to use
+	int version, dataUsedBits;
+	for (version = minVersion; ; version++) {
+		int dataCapacityBits = getNumDataCodewords(version, ecl) * 8;  // Number of data bits available
+		dataUsedBits = getTotalBits(segs, len, version);
+		if (dataUsedBits != -1 && dataUsedBits <= dataCapacityBits)
+			break;  // This version number is found to be suitable
+		if (version >= maxVersion) {  // All versions in the range could not fit the given data
+			qrcode[0] = 0;  // Set size to invalid value for safety
+			return false;
+		}
+	}
+	assert(dataUsedBits != -1);
+	
+	// Increase the error correction level while the data still fits in the current version number
+	for (int i = (int)qrcodegen_Ecc_MEDIUM; i <= (int)qrcodegen_Ecc_HIGH; i++) {  // From low to high
+		if (boostEcl && dataUsedBits <= getNumDataCodewords(version, (enum qrcodegen_Ecc)i) * 8)
+			ecl = (enum qrcodegen_Ecc)i;
+	}
+	
+	// Concatenate all segments to create the data bit string
+	memset(qrcode, 0, qrcodegen_BUFFER_LEN_FOR_VERSION(version) * sizeof(qrcode[0]));
+	int bitLen = 0;
+	for (size_t i = 0; i < len; i++) {
+		const struct qrcodegen_Segment *seg = &segs[i];
+		unsigned int modeBits = 0;  // Dummy value
+		switch (seg->mode) {
+			case qrcodegen_Mode_NUMERIC     :  modeBits = 0x1;  break;
+			case qrcodegen_Mode_ALPHANUMERIC:  modeBits = 0x2;  break;
+			case qrcodegen_Mode_BYTE        :  modeBits = 0x4;  break;
+			case qrcodegen_Mode_KANJI       :  modeBits = 0x8;  break;
+			case qrcodegen_Mode_ECI         :  modeBits = 0x7;  break;
+			default:  assert(false);
+		}
+		appendBitsToBuffer(modeBits, 4, qrcode, &bitLen);
+		appendBitsToBuffer(seg->numChars, numCharCountBits(seg->mode, version), qrcode, &bitLen);
+		for (int j = 0; j < seg->bitLength; j++)
+			appendBitsToBuffer((seg->data[j >> 3] >> (7 - (j & 7))) & 1, 1, qrcode, &bitLen);
+	}
+	
+	// Add terminator and pad up to a byte if applicable
+	int dataCapacityBits = getNumDataCodewords(version, ecl) * 8;
+	assert(bitLen <= dataCapacityBits);
+	int terminatorBits = dataCapacityBits - bitLen;
+	if (terminatorBits > 4)
+		terminatorBits = 4;
+	appendBitsToBuffer(0, terminatorBits, qrcode, &bitLen);
+	appendBitsToBuffer(0, (8 - bitLen % 8) % 8, qrcode, &bitLen);
+	assert(bitLen % 8 == 0);
+	
+	// Pad with alternating bytes until data capacity is reached
+	for (uint8_t padByte = 0xEC; bitLen < dataCapacityBits; padByte ^= 0xEC ^ 0x11)
+		appendBitsToBuffer(padByte, 8, qrcode, &bitLen);
+	
+	// Draw function and data codeword modules
+	addEccAndInterleave(qrcode, version, ecl, tempBuffer);
+	initializeFunctionModules(version, qrcode);
+	drawCodewords(tempBuffer, getNumRawDataModules(version) / 8, qrcode);
+	drawWhiteFunctionModules(qrcode, version);
+	initializeFunctionModules(version, tempBuffer);
+	
+	// Handle masking
+	if (mask == qrcodegen_Mask_AUTO) {  // Automatically choose best mask
+		long minPenalty = LONG_MAX;
+		for (int i = 0; i < 8; i++) {
+			drawFormatBits(ecl, (enum qrcodegen_Mask)i, qrcode);
+			applyMask(tempBuffer, qrcode, (enum qrcodegen_Mask)i);
+			long penalty = getPenaltyScore(qrcode);
+			if (penalty < minPenalty) {
+				mask = (enum qrcodegen_Mask)i;
+				minPenalty = penalty;
+			}
+			applyMask(tempBuffer, qrcode, (enum qrcodegen_Mask)i);  // Undoes the mask due to XOR
+		}
+	}
+	assert(0 <= (int)mask && (int)mask <= 7);
+	drawFormatBits(ecl, mask, qrcode);
+	applyMask(tempBuffer, qrcode, mask);
+	return true;
+}
+
+
+// Returns the number of bits needed to encode the given list of segments at the given version.
+// The result is in the range [0, 32767] if successful. Otherwise, -1 is returned if any segment
+// has more characters than allowed by that segment's mode's character count field at the version,
+// or if the actual answer exceeds INT16_MAX.
+testable int getTotalBits(const struct qrcodegen_Segment segs[], size_t len, int version) {
+	assert(segs != NULL || len == 0);
+	assert(qrcodegen_VERSION_MIN <= version && version <= qrcodegen_VERSION_MAX);
+	int result = 0;
+	for (size_t i = 0; i < len; i++) {
+		int numChars = segs[i].numChars;
+		int bitLength = segs[i].bitLength;
+		assert(0 <= numChars && numChars <= INT16_MAX);
+		assert(0 <= bitLength && bitLength <= INT16_MAX);
+		int ccbits = numCharCountBits(segs[i].mode, version);
+		assert(0 <= ccbits && ccbits <= 16);
+		// Fail if segment length value doesn't fit in the length field's bit-width
+		if (numChars >= (1L << ccbits))
+			return -1;
+		long temp = 4L + ccbits + bitLength;
+		if (temp > INT16_MAX - result)
+			return -1;
+		result += temp;
+	}
+	assert(0 <= result && result <= INT16_MAX);
+	return result;
+}
+
+
+// Returns the bit width of the segment character count field for the
+// given mode at the given version number. The result is in the range [0, 16].
+static int numCharCountBits(enum qrcodegen_Mode mode, int version) {
+	assert(qrcodegen_VERSION_MIN <= version && version <= qrcodegen_VERSION_MAX);
+	int i = -1;  // Dummy value
+	if      ( 1 <= version && version <=  9)  i = 0;
+	else if (10 <= version && version <= 26)  i = 1;
+	else if (27 <= version && version <= 40)  i = 2;
+	else  assert(false);
+	
+	switch (mode) {
+		case qrcodegen_Mode_NUMERIC     : { static const int temp[] = {10, 12, 14}; return temp[i]; }
+		case qrcodegen_Mode_ALPHANUMERIC: { static const int temp[] = { 9, 11, 13}; return temp[i]; }
+		case qrcodegen_Mode_BYTE        : { static const int temp[] = { 8, 16, 16}; return temp[i]; }
+		case qrcodegen_Mode_KANJI       : { static const int temp[] = { 8, 10, 12}; return temp[i]; }
+		case qrcodegen_Mode_ECI         : return 0;
+		default:  assert(false);
+	}
+	return -1;  // Dummy value
 }

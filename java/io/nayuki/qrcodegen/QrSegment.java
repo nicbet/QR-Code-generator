@@ -25,7 +25,6 @@ package io.nayuki.qrcodegen;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -51,7 +50,10 @@ public final class QrSegment {
 	 */
 	public static QrSegment makeBytes(byte[] data) {
 		Objects.requireNonNull(data);
-		return new QrSegment(Mode.BYTE, data.length, data, data.length * 8);
+		BitBuffer bb = new BitBuffer();
+		for (byte b : data)
+			bb.appendBits(b & 0xFF, 8);
+		return new QrSegment(Mode.BYTE, data.length, bb);
 	}
 	
 	
@@ -69,18 +71,19 @@ public final class QrSegment {
 		
 		BitBuffer bb = new BitBuffer();
 		int i;
-		for (i = 0; i + 3 <= digits.length(); i += 3)  // Process groups of 3
+		for (i = 0; i <= digits.length() - 3; i += 3)  // Process groups of 3
 			bb.appendBits(Integer.parseInt(digits.substring(i, i + 3)), 10);
 		int rem = digits.length() - i;
 		if (rem > 0)  // 1 or 2 digits remaining
 			bb.appendBits(Integer.parseInt(digits.substring(i)), rem * 3 + 1);
-		return new QrSegment(Mode.NUMERIC, digits.length(), bb.getBytes(), bb.bitLength());
+		return new QrSegment(Mode.NUMERIC, digits.length(), bb);
 	}
 	
 	
 	/**
-	 * Returns a segment representing the specified text string encoded in alphanumeric mode. The characters allowed are:
-	 * 0 to 9, A to Z (uppercase only), space, dollar, percent, asterisk, plus, hyphen, period, slash, colon.
+	 * Returns a segment representing the specified text string encoded in alphanumeric mode.
+	 * The characters allowed are: 0 to 9, A to Z (uppercase only), space,
+	 * dollar, percent, asterisk, plus, hyphen, period, slash, colon.
 	 * @param text a string of text, with only certain characters allowed
 	 * @return a segment containing the data
 	 * @throws NullPointerException if the string is {@code null}
@@ -93,14 +96,14 @@ public final class QrSegment {
 		
 		BitBuffer bb = new BitBuffer();
 		int i;
-		for (i = 0; i + 2 <= text.length(); i += 2) {  // Process groups of 2
-			int temp = ALPHANUMERIC_ENCODING_TABLE[text.charAt(i) - ' '] * 45;
-			temp += ALPHANUMERIC_ENCODING_TABLE[text.charAt(i + 1) - ' '];
+		for (i = 0; i <= text.length() - 2; i += 2) {  // Process groups of 2
+			int temp = ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)) * 45;
+			temp += ALPHANUMERIC_CHARSET.indexOf(text.charAt(i + 1));
 			bb.appendBits(temp, 11);
 		}
 		if (i < text.length())  // 1 character remaining
-			bb.appendBits(ALPHANUMERIC_ENCODING_TABLE[text.charAt(i) - ' '], 6);
-		return new QrSegment(Mode.ALPHANUMERIC, text.length(), bb.getBytes(), bb.bitLength());
+			bb.appendBits(ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)), 6);
+		return new QrSegment(Mode.ALPHANUMERIC, text.length(), bb);
 	}
 	
 	
@@ -116,8 +119,7 @@ public final class QrSegment {
 		
 		// Select the most efficient segment encoding automatically
 		List<QrSegment> result = new ArrayList<>();
-		if (text.equals(""))
-			return result;
+		if (text.equals(""));  // Leave result empty
 		else if (NUMERIC_REGEX.matcher(text).matches())
 			result.add(makeNumeric(text));
 		else if (ALPHANUMERIC_REGEX.matcher(text).matches())
@@ -125,6 +127,29 @@ public final class QrSegment {
 		else
 			result.add(makeBytes(text.getBytes(StandardCharsets.UTF_8)));
 		return result;
+	}
+	
+	
+	/**
+	 * Returns a segment representing an Extended Channel Interpretation
+	 * (ECI) designator with the specified assignment value.
+	 * @param assignVal the ECI assignment number (see the AIM ECI specification)
+	 * @return a segment containing the data
+	 * @throws IllegalArgumentException if the value is outside the range [0, 10<sup>6</sup>)
+	 */
+	public static QrSegment makeEci(int assignVal) {
+		BitBuffer bb = new BitBuffer();
+		if (0 <= assignVal && assignVal < (1 << 7))
+			bb.appendBits(assignVal, 8);
+		else if ((1 << 7) <= assignVal && assignVal < (1 << 14)) {
+			bb.appendBits(2, 2);
+			bb.appendBits(assignVal, 14);
+		} else if ((1 << 14) <= assignVal && assignVal < 1000000) {
+			bb.appendBits(6, 3);
+			bb.appendBits(assignVal, 21);
+		} else
+			throw new IllegalArgumentException("ECI assignment value out of range");
+		return new QrSegment(Mode.ECI, 0, bb);
 	}
 	
 	
@@ -137,48 +162,38 @@ public final class QrSegment {
 	/** The length of this segment's unencoded data, measured in characters. Always zero or positive. */
 	public final int numChars;
 	
-	/** The bits of this segment packed into a byte array in big endian. Accessed through {@link getByte(int)}. Not {@code null}. */
-	private final byte[] data;
-	
-	/** The length of this segment's encoded data, measured in bits. Satisfies 0 &le; {@code bitLength} &le; {@code data.length} &times; 8. */
-	public final int bitLength;
+	/** The data bits of this segment. Accessed through {@link getBits()}. Not {@code null}. */
+	final BitBuffer data;
 	
 	
 	/*---- Constructor ----*/
 	
 	/**
-	 * Creates a new QR Code data segment with the specified parameters and data.
+	 * Constructs a QR Code data segment with the specified parameters and data.
 	 * @param md the mode, which is not {@code null}
 	 * @param numCh the data length in characters, which is non-negative
-	 * @param bitLen the data length in bits, which is non-negative
-	 * @param b the bits packed into bytes, which is not {@code null}
-	 * @throws NullPointerException if the mode or array is {@code null}
-	 * @throws IllegalArgumentException if the character count or bit length are negative or invalid
+	 * @param data the data bits of this segment, which is not {@code null}
+	 * @throws NullPointerException if the mode or bit buffer is {@code null}
+	 * @throws IllegalArgumentException if the character count is negative
 	 */
-	public QrSegment(Mode md, int numCh, byte[] b, int bitLen) {
-		Objects.requireNonNull(md);
-		Objects.requireNonNull(b);
-		if (numCh < 0 || bitLen < 0 || bitLen > b.length * 8L)
+	public QrSegment(Mode md, int numCh, BitBuffer data) {
+		mode = Objects.requireNonNull(md);
+		Objects.requireNonNull(data);
+		if (numCh < 0)
 			throw new IllegalArgumentException("Invalid value");
-		mode = md;
 		numChars = numCh;
-		data = Arrays.copyOf(b, (bitLen + 7) / 8);  // Trim to precise length and also make defensive copy
-		bitLength = bitLen;
+		this.data = data.clone();  // Make defensive copy
 	}
 	
 	
-	/*---- Method ----*/
+	/*---- Methods ----*/
 	
 	/**
-	 * Returns the data byte at the specified index.
-	 * @param index the index to retrieve from, satisfying 0 &le; {@code index} &lt; ceil({@code bitLength} &divide; 8)
-	 * @return the data byte at the specified index
-	 * @throws IndexOutOfBoundsException if the index is out of bounds
+	 * Returns the data bits of this segment.
+	 * @return the data bits of this segment (not {@code null})
 	 */
-	public byte getByte(int index) {
-		if (index < 0 || index > data.length)
-			throw new IndexOutOfBoundsException();
-		return data[index];
+	public BitBuffer getBits() {
+		return data.clone();  // Make defensive copy
 	}
 	
 	
@@ -195,7 +210,7 @@ public final class QrSegment {
 			// Fail if segment length value doesn't fit in the length field's bit-width
 			if (seg.numChars >= (1 << ccbits))
 				return -1;
-			result += 4L + ccbits + seg.bitLength;
+			result += 4L + ccbits + seg.data.bitLength();
 			if (result > Integer.MAX_VALUE)
 				return -1;
 		}
@@ -211,13 +226,8 @@ public final class QrSegment {
 	/** Can test whether a string is encodable in alphanumeric mode (such as by using {@link #makeAlphanumeric(String)}). */
 	public static final Pattern ALPHANUMERIC_REGEX = Pattern.compile("[A-Z0-9 $%*+./:-]*");
 	
-	/** Maps shifted ASCII codes to alphanumeric mode character codes. */
-	private static final byte[] ALPHANUMERIC_ENCODING_TABLE = {
-		// SP,  !,  ",  #,  $,  %,  &,  ',  (,  ),  *,  +,  ,,  -,  .,  /,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  :,  ;,  <,  =,  >,  ?,  @,  // ASCII codes 32 to 64
-		   36, -1, -1, -1, 37, 38, -1, -1, -1, -1, 39, 40, -1, 41, 42, 43,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 44, -1, -1, -1, -1, -1, -1,  // Array indices 0 to 32
-		   10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,  // Array indices 33 to 58
-		//  A,  B,  C,  D,  E,  F,  G,  H,  I,  J,  K,  L,  M,  N,  O,  P,  Q,  R,  S,  T,  U,  V,  W,  X,  Y,  Z,  // ASCII codes 65 to 90
-	};
+	/** The set of all legal characters in alphanumeric mode, where each character value maps to the index in the string. */
+	private static final String ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
 	
 	
 	
@@ -233,7 +243,8 @@ public final class QrSegment {
 		NUMERIC     (0x1, 10, 12, 14),
 		ALPHANUMERIC(0x2,  9, 11, 13),
 		BYTE        (0x4,  8, 16, 16),
-		KANJI       (0x8,  8, 10, 12);
+		KANJI       (0x8,  8, 10, 12),
+		ECI         (0x7,  0,  0,  0);
 		
 		
 		/*-- Fields --*/
@@ -247,7 +258,7 @@ public final class QrSegment {
 		/*-- Constructor --*/
 		
 		private Mode(int mode, int... ccbits) {
-			this.modeBits = mode;
+			modeBits = mode;
 			numBitsCharCount = ccbits;
 		}
 		
@@ -256,8 +267,8 @@ public final class QrSegment {
 		
 		/**
 		 * Returns the bit width of the segment character count field for this mode object at the specified version number.
-		 * @param ver the version number, which is between 1 to 40, inclusive
-		 * @return the number of bits for the character count, which is between 8 to 16, inclusive
+		 * @param ver the version number, which is between 1 to 40 (inclusive)
+		 * @return the number of bits for the character count, which is between 8 to 16 (inclusive)
 		 * @throws IllegalArgumentException if the version number is out of range
 		 */
 		int numCharCountBits(int ver) {

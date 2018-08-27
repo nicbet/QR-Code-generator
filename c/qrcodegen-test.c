@@ -37,13 +37,22 @@
 
 #define ARRAY_LENGTH(name)  (sizeof(name) / sizeof(name[0]))
 
+#ifndef __cplusplus
+	#define MALLOC(num, type)  malloc((num) * sizeof(type))
+#else
+	#define MALLOC(num, type)  static_cast<type*>(malloc((num) * sizeof(type)))
+#endif
+
 
 // Global variables
 static int numTestCases = 0;
 
 
 // Prototypes of private functions under test
-int getTextProperties(const char *text, bool *isNumeric, bool *isAlphanumeric, int *textBits);
+extern const int8_t ECC_CODEWORDS_PER_BLOCK[4][41];
+extern const int8_t NUM_ERROR_CORRECTION_BLOCKS[4][41];
+void appendBitsToBuffer(unsigned int val, int numBits, uint8_t buffer[], int *bitLen);
+void addEccAndInterleave(uint8_t data[], int version, enum qrcodegen_Ecc ecl, uint8_t result[]);
 int getNumDataCodewords(int version, enum qrcodegen_Ecc ecl);
 int getNumRawDataModules(int version);
 void calcReedSolomonGenerator(int degree, uint8_t result[]);
@@ -54,70 +63,122 @@ int getAlignmentPatternPositions(int version, uint8_t result[7]);
 bool getModule(const uint8_t qrcode[], int x, int y);
 void setModule(uint8_t qrcode[], int x, int y, bool isBlack);
 void setModuleBounded(uint8_t qrcode[], int x, int y, bool isBlack);
+int calcSegmentBitLength(enum qrcodegen_Mode mode, size_t numChars);
+int getTotalBits(const struct qrcodegen_Segment segs[], size_t len, int version);
 
 
 /*---- Test cases ----*/
 
-static void testGetTextProperties(void) {
-	bool isNumeric, isAlphanumeric;
-	int textLen, textBits;
+static void testAppendBitsToBuffer(void) {
+	{
+		uint8_t buf[1] = {0};
+		int bitLen = 0;
+		appendBitsToBuffer(0, 0, buf, &bitLen);
+		assert(bitLen == 0);
+		assert(buf[0] == 0);
+		appendBitsToBuffer(1, 1, buf, &bitLen);
+		assert(bitLen == 1);
+		assert(buf[0] == 0x80);
+		appendBitsToBuffer(0, 1, buf, &bitLen);
+		assert(bitLen == 2);
+		assert(buf[0] == 0x80);
+		appendBitsToBuffer(5, 3, buf, &bitLen);
+		assert(bitLen == 5);
+		assert(buf[0] == 0xA8);
+		appendBitsToBuffer(6, 3, buf, &bitLen);
+		assert(bitLen == 8);
+		assert(buf[0] == 0xAE);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[6] = {0};
+		int bitLen = 0;
+		appendBitsToBuffer(16942, 16, buf, &bitLen);
+		assert(bitLen == 16);
+		assert(buf[0] == 0x42 && buf[1] == 0x2E && buf[2] == 0x00 && buf[3] == 0x00 && buf[4] == 0x00 && buf[5] == 0x00);
+		appendBitsToBuffer(10, 7, buf, &bitLen);
+		assert(bitLen == 23);
+		assert(buf[0] == 0x42 && buf[1] == 0x2E && buf[2] == 0x14 && buf[3] == 0x00 && buf[4] == 0x00 && buf[5] == 0x00);
+		appendBitsToBuffer(15, 4, buf, &bitLen);
+		assert(bitLen == 27);
+		assert(buf[0] == 0x42 && buf[1] == 0x2E && buf[2] == 0x15 && buf[3] == 0xE0 && buf[4] == 0x00 && buf[5] == 0x00);
+		appendBitsToBuffer(26664, 15, buf, &bitLen);
+		assert(bitLen == 42);
+		assert(buf[0] == 0x42 && buf[1] == 0x2E && buf[2] == 0x15 && buf[3] == 0xFA && buf[4] == 0x0A && buf[5] == 0x00);
+		numTestCases++;
+	}
+}
+
+
+// Ported from the Java version of the code.
+static uint8_t *addEccAndInterleaveReference(const uint8_t *data, int version, enum qrcodegen_Ecc ecl) {
+	// Calculate parameter numbers
+	int numBlocks = NUM_ERROR_CORRECTION_BLOCKS[(int)ecl][version];
+	int blockEccLen = ECC_CODEWORDS_PER_BLOCK[(int)ecl][version];
+	int rawCodewords = getNumRawDataModules(version) / 8;
+	int numShortBlocks = numBlocks - rawCodewords % numBlocks;
+	int shortBlockLen = rawCodewords / numBlocks;
 	
-	textLen = getTextProperties("", &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen == 0 && isNumeric && isAlphanumeric && textBits == 0);
-	numTestCases++;
+	// Split data into blocks and append ECC to each block
+	uint8_t **blocks = MALLOC(numBlocks, uint8_t*);
+	uint8_t *generator = MALLOC(blockEccLen, uint8_t);
+	calcReedSolomonGenerator(blockEccLen, generator);
+	for (int i = 0, k = 0; i < numBlocks; i++) {
+		uint8_t *block = MALLOC(shortBlockLen + 1, uint8_t);
+		int blockDataLen = shortBlockLen - blockEccLen + (i < numShortBlocks ? 0 : 1);
+		memcpy(block, &data[k], blockDataLen * sizeof(uint8_t));
+		calcReedSolomonRemainder(&data[k], blockDataLen, generator, blockEccLen, &block[shortBlockLen + 1 - blockEccLen]);
+		k += blockDataLen;
+		blocks[i] = block;
+	}
+	free(generator);
 	
-	textLen = getTextProperties("0", &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen == 1 && isNumeric && isAlphanumeric && textBits == 4);
-	numTestCases++;
-	
-	textLen = getTextProperties("768", &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen == 3 && isNumeric && isAlphanumeric && textBits == 10);
-	numTestCases++;
-	
-	textLen = getTextProperties("A1", &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen == 2 && !isNumeric && isAlphanumeric && textBits == 11);
-	numTestCases++;
-	
-	textLen = getTextProperties("THE: QUICK+/*BROWN$FOX.", &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen == 23 && !isNumeric && isAlphanumeric && textBits == 127);
-	numTestCases++;
-	
-	textLen = getTextProperties("aB 9", &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen == 4 && !isNumeric && !isAlphanumeric && textBits == 32);
-	numTestCases++;
-	
-	char text[32769];
-	
-	memset(text, '5', sizeof(text));
-	text[32768] = '\0';
-	textLen = getTextProperties(text, &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen < 0);
-	numTestCases++;
-	
-	memset(text, '1', sizeof(text));
-	text[32767] = '\0';
-	textLen = getTextProperties(text, &isNumeric, &isAlphanumeric, &textBits);
-	assert((109224L > INT_MAX && textLen < 0) ||
-		(109224L <= INT_MAX && textLen == 32767 && isNumeric && isAlphanumeric && textBits == 109224L));
-	numTestCases++;
-	
-	memset(text, 'a', sizeof(text));
-	text[4095] = '\0';
-	textLen = getTextProperties(text, &isNumeric, &isAlphanumeric, &textBits);
-	assert(textLen == 4095 && !isNumeric && !isAlphanumeric && textBits == 32760);
-	numTestCases++;
-	
-	memset(text, 'a', sizeof(text));
-	text[32767] = '\0';
-	textLen = getTextProperties(text, &isNumeric, &isAlphanumeric, &textBits);
-	assert((262136L > INT_MAX && textLen < 0) ||
-		(262136L <= INT_MAX && textLen == 32767 && !isNumeric && !isAlphanumeric && textBits == 262136L));
-	numTestCases++;
+	// Interleave (not concatenate) the bytes from every block into a single sequence
+	uint8_t *result = MALLOC(rawCodewords, uint8_t);
+	for (int i = 0, k = 0; i < shortBlockLen + 1; i++) {
+		for (int j = 0; j < numBlocks; j++) {
+			// Skip the padding byte in short blocks
+			if (i != shortBlockLen - blockEccLen || j >= numShortBlocks) {
+				result[k] = blocks[j][i];
+				k++;
+			}
+		}
+	}
+	for (int i = 0; i < numBlocks; i++)
+		free(blocks[i]);
+	free(blocks);
+	return result;
+}
+
+
+static void testAddEccAndInterleave(void) {
+	for (int version = 1; version <= 40; version++) {
+		for (int ecl = 0; ecl < 4; ecl++) {
+			int dataLen = getNumDataCodewords(version, (enum qrcodegen_Ecc)ecl);
+			uint8_t *pureData = MALLOC(dataLen, uint8_t);
+			for (int i = 0; i < dataLen; i++)
+				pureData[i] = rand() % 256;
+			uint8_t *expectOutput = addEccAndInterleaveReference(pureData, version, (enum qrcodegen_Ecc)ecl);
+			
+			int dataAndEccLen = getNumRawDataModules(version) / 8;
+			uint8_t *paddedData = MALLOC(dataAndEccLen, uint8_t);
+			memcpy(paddedData, pureData, dataLen * sizeof(uint8_t));
+			uint8_t *actualOutput = MALLOC(dataAndEccLen, uint8_t);
+			addEccAndInterleave(paddedData, version, (enum qrcodegen_Ecc)ecl, actualOutput);
+			
+			assert(memcmp(actualOutput, expectOutput, dataAndEccLen * sizeof(uint8_t)) == 0);
+			free(pureData);
+			free(expectOutput);
+			free(paddedData);
+			free(actualOutput);
+			numTestCases++;
+		}
+	}
 }
 
 
 static void testGetNumDataCodewords(void) {
-	int cases[][3] = {
+	const int cases[][3] = {
 		{ 3, 1,   44},
 		{ 3, 2,   34},
 		{ 3, 3,   26},
@@ -149,7 +210,7 @@ static void testGetNumDataCodewords(void) {
 		{40, 1, 2334},
 	};
 	for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
-		int *tc = cases[i];
+		const int *tc = cases[i];
 		assert(getNumDataCodewords(tc[0], (enum qrcodegen_Ecc)tc[1]) == tc[2]);
 		numTestCases++;
 	}
@@ -157,7 +218,7 @@ static void testGetNumDataCodewords(void) {
 
 
 static void testGetNumRawDataModules(void) {
-	int cases[][2] = {
+	const int cases[][2] = {
 		{ 1,   208},
 		{ 2,   359},
 		{ 3,   567},
@@ -173,7 +234,7 @@ static void testGetNumRawDataModules(void) {
 		{40, 29648},
 	};
 	for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
-		int *tc = cases[i];
+		const int *tc = cases[i];
 		assert(getNumRawDataModules(tc[0]) == tc[1]);
 		numTestCases++;
 	}
@@ -279,7 +340,7 @@ static void testCalcReedSolomonRemainder(void) {
 
 
 static void testFiniteFieldMultiply(void) {
-	uint8_t cases[][3] = {
+	const uint8_t cases[][3] = {
 		{0x00, 0x00, 0x00},
 		{0x01, 0x01, 0x01},
 		{0x02, 0x02, 0x04},
@@ -298,7 +359,7 @@ static void testFiniteFieldMultiply(void) {
 		{0xFF, 0xFF, 0xE2},
 	};
 	for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
-		uint8_t *tc = cases[i];
+		const uint8_t *tc = cases[i];
 		assert(finiteFieldMultiply(tc[0], tc[1]) == tc[2]);
 		numTestCases++;
 	}
@@ -307,7 +368,7 @@ static void testFiniteFieldMultiply(void) {
 
 static void testInitializeFunctionModulesEtc(void) {
 	for (int ver = 1; ver <= 40; ver++) {
-		uint8_t *qrcode = malloc(qrcodegen_BUFFER_LEN_FOR_VERSION(ver) * sizeof(uint8_t));
+		uint8_t *qrcode = MALLOC(qrcodegen_BUFFER_LEN_FOR_VERSION(ver), uint8_t);
 		assert(qrcode != NULL);
 		initializeFunctionModules(ver, qrcode);
 		
@@ -338,7 +399,7 @@ static void testInitializeFunctionModulesEtc(void) {
 
 
 static void testGetAlignmentPatternPositions(void) {
-	int cases[][9] = {
+	const int cases[][9] = {
 		{ 1, 0,  -1,  -1,  -1,  -1,  -1,  -1,  -1},
 		{ 2, 2,   6,  18,  -1,  -1,  -1,  -1,  -1},
 		{ 3, 2,   6,  22,  -1,  -1,  -1,  -1,  -1},
@@ -353,7 +414,7 @@ static void testGetAlignmentPatternPositions(void) {
 		{40, 7,   6,  30,  58,  86, 114, 142, 170},
 	};
 	for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
-		int *tc = cases[i];
+		const int *tc = cases[i];
 		uint8_t pos[7];
 		int num = getAlignmentPatternPositions(tc[0], pos);
 		assert(num == tc[1]);
@@ -444,11 +505,559 @@ static void testGetSetModuleRandomly(void) {
 }
 
 
+static void testIsAlphanumeric(void) {
+	struct TestCase {
+		bool answer;
+		const char *text;
+	};
+	const struct TestCase cases[] = {
+		{true, ""},
+		{true, "0"},
+		{true, "A"},
+		{false, "a"},
+		{true, " "},
+		{true, "."},
+		{true, "*"},
+		{false, ","},
+		{false, "|"},
+		{false, "@"},
+		{true, "XYZ"},
+		{false, "XYZ!"},
+		{true, "79068"},
+		{true, "+123 ABC$"},
+		{false, "\x01"},
+		{false, "\x7F"},
+		{false, "\x80"},
+		{false, "\xC0"},
+		{false, "\xFF"},
+	};
+	for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+		assert(qrcodegen_isAlphanumeric(cases[i].text) == cases[i].answer);
+		numTestCases++;
+	}
+}
+
+
+static void testIsNumeric(void) {
+	struct TestCase {
+		bool answer;
+		const char *text;
+	};
+	const struct TestCase cases[] = {
+		{true, ""},
+		{true, "0"},
+		{false, "A"},
+		{false, "a"},
+		{false, " "},
+		{false, "."},
+		{false, "*"},
+		{false, ","},
+		{false, "|"},
+		{false, "@"},
+		{false, "XYZ"},
+		{false, "XYZ!"},
+		{true, "79068"},
+		{false, "+123 ABC$"},
+		{false, "\x01"},
+		{false, "\x7F"},
+		{false, "\x80"},
+		{false, "\xC0"},
+		{false, "\xFF"},
+	};
+	for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+		assert(qrcodegen_isNumeric(cases[i].text) == cases[i].answer);
+		numTestCases++;
+	}
+}
+
+
+static void testCalcSegmentBufferSize(void) {
+	{
+		const size_t cases[][2] = {
+			{0, 0},
+			{1, 1},
+			{2, 1},
+			{3, 2},
+			{4, 2},
+			{5, 3},
+			{6, 3},
+			{1472, 614},
+			{2097, 874},
+			{5326, 2220},
+			{9828, 4095},
+			{9829, 4096},
+			{9830, 4096},
+			{9831, SIZE_MAX},
+			{9832, SIZE_MAX},
+			{12000, SIZE_MAX},
+			{28453, SIZE_MAX},
+			{55555, SIZE_MAX},
+			{SIZE_MAX / 6, SIZE_MAX},
+			{SIZE_MAX / 4, SIZE_MAX},
+			{SIZE_MAX / 2, SIZE_MAX},
+			{SIZE_MAX / 1, SIZE_MAX},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(qrcodegen_calcSegmentBufferSize(qrcodegen_Mode_NUMERIC, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		const size_t cases[][2] = {
+			{0, 0},
+			{1, 1},
+			{2, 2},
+			{3, 3},
+			{4, 3},
+			{5, 4},
+			{6, 5},
+			{1472, 1012},
+			{2097, 1442},
+			{5326, 3662},
+			{5955, 4095},
+			{5956, 4095},
+			{5957, 4096},
+			{5958, SIZE_MAX},
+			{5959, SIZE_MAX},
+			{12000, SIZE_MAX},
+			{28453, SIZE_MAX},
+			{55555, SIZE_MAX},
+			{SIZE_MAX / 10, SIZE_MAX},
+			{SIZE_MAX / 8, SIZE_MAX},
+			{SIZE_MAX / 5, SIZE_MAX},
+			{SIZE_MAX / 2, SIZE_MAX},
+			{SIZE_MAX / 1, SIZE_MAX},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(qrcodegen_calcSegmentBufferSize(qrcodegen_Mode_ALPHANUMERIC, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		const size_t cases[][2] = {
+			{0, 0},
+			{1, 1},
+			{2, 2},
+			{3, 3},
+			{1472, 1472},
+			{2097, 2097},
+			{4094, 4094},
+			{4095, 4095},
+			{4096, SIZE_MAX},
+			{4097, SIZE_MAX},
+			{5957, SIZE_MAX},
+			{12000, SIZE_MAX},
+			{28453, SIZE_MAX},
+			{55555, SIZE_MAX},
+			{SIZE_MAX / 16 + 1, SIZE_MAX},
+			{SIZE_MAX / 14, SIZE_MAX},
+			{SIZE_MAX / 9, SIZE_MAX},
+			{SIZE_MAX / 7, SIZE_MAX},
+			{SIZE_MAX / 4, SIZE_MAX},
+			{SIZE_MAX / 3, SIZE_MAX},
+			{SIZE_MAX / 2, SIZE_MAX},
+			{SIZE_MAX / 1, SIZE_MAX},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(qrcodegen_calcSegmentBufferSize(qrcodegen_Mode_BYTE, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		const size_t cases[][2] = {
+			{0, 0},
+			{1, 2},
+			{2, 4},
+			{3, 5},
+			{1472, 2392},
+			{2097, 3408},
+			{2519, 4094},
+			{2520, 4095},
+			{2521, SIZE_MAX},
+			{5957, SIZE_MAX},
+			{2522, SIZE_MAX},
+			{12000, SIZE_MAX},
+			{28453, SIZE_MAX},
+			{55555, SIZE_MAX},
+			{SIZE_MAX / 13 + 1, SIZE_MAX},
+			{SIZE_MAX / 12, SIZE_MAX},
+			{SIZE_MAX / 9, SIZE_MAX},
+			{SIZE_MAX / 4, SIZE_MAX},
+			{SIZE_MAX / 3, SIZE_MAX},
+			{SIZE_MAX / 2, SIZE_MAX},
+			{SIZE_MAX / 1, SIZE_MAX},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(qrcodegen_calcSegmentBufferSize(qrcodegen_Mode_KANJI, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		assert(qrcodegen_calcSegmentBufferSize(qrcodegen_Mode_ECI, 0) == 3);
+		numTestCases++;
+	}
+}
+
+
+static void testCalcSegmentBitLength(void) {
+	{
+		const int cases[][2] = {
+			{0, 0},
+			{1, 4},
+			{2, 7},
+			{3, 10},
+			{4, 14},
+			{5, 17},
+			{6, 20},
+			{1472, 4907},
+			{2097, 6990},
+			{5326, 17754},
+			{9828, 32760},
+			{9829, 32764},
+			{9830, 32767},
+			{9831, -1},
+			{9832, -1},
+			{12000, -1},
+			{28453, -1},
+			{INT_MAX / 3, -1},
+			{INT_MAX / 2, -1},
+			{INT_MAX / 1, -1},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(calcSegmentBitLength(qrcodegen_Mode_NUMERIC, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		const int cases[][2] = {
+			{0, 0},
+			{1, 6},
+			{2, 11},
+			{3, 17},
+			{4, 22},
+			{5, 28},
+			{6, 33},
+			{1472, 8096},
+			{2097, 11534},
+			{5326, 29293},
+			{5955, 32753},
+			{5956, 32758},
+			{5957, 32764},
+			{5958, -1},
+			{5959, -1},
+			{12000, -1},
+			{28453, -1},
+			{INT_MAX / 5, -1},
+			{INT_MAX / 4, -1},
+			{INT_MAX / 3, -1},
+			{INT_MAX / 2, -1},
+			{INT_MAX / 1, -1},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(calcSegmentBitLength(qrcodegen_Mode_ALPHANUMERIC, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		const int cases[][2] = {
+			{0, 0},
+			{1, 8},
+			{2, 16},
+			{3, 24},
+			{1472, 11776},
+			{2097, 16776},
+			{4094, 32752},
+			{4095, 32760},
+			{4096, -1},
+			{4097, -1},
+			{5957, -1},
+			{12000, -1},
+			{28453, -1},
+			{INT_MAX / 8 + 1, -1},
+			{INT_MAX / 7, -1},
+			{INT_MAX / 6, -1},
+			{INT_MAX / 5, -1},
+			{INT_MAX / 4, -1},
+			{INT_MAX / 3, -1},
+			{INT_MAX / 2, -1},
+			{INT_MAX / 1, -1},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(calcSegmentBitLength(qrcodegen_Mode_BYTE, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		const int cases[][2] = {
+			{0, 0},
+			{1, 13},
+			{2, 26},
+			{3, 39},
+			{1472, 19136},
+			{2097, 27261},
+			{2519, 32747},
+			{2520, 32760},
+			{2521, -1},
+			{5957, -1},
+			{2522, -1},
+			{12000, -1},
+			{28453, -1},
+			{INT_MAX / 13 + 1, -1},
+			{INT_MAX / 12, -1},
+			{INT_MAX / 9, -1},
+			{INT_MAX / 4, -1},
+			{INT_MAX / 3, -1},
+			{INT_MAX / 2, -1},
+			{INT_MAX / 1, -1},
+		};
+		for (size_t i = 0; i < ARRAY_LENGTH(cases); i++) {
+			assert(calcSegmentBitLength(qrcodegen_Mode_KANJI, cases[i][0]) == cases[i][1]);
+			numTestCases++;
+		}
+	}
+	{
+		assert(calcSegmentBitLength(qrcodegen_Mode_ECI, 0) == 24);
+		numTestCases++;
+	}
+}
+
+
+static void testMakeBytes(void) {
+	{
+		struct qrcodegen_Segment seg = qrcodegen_makeBytes(NULL, 0, NULL);
+		assert(seg.mode == qrcodegen_Mode_BYTE);
+		assert(seg.numChars == 0);
+		assert(seg.bitLength == 0);
+		numTestCases++;
+	}
+	{
+		const uint8_t data[] = {0x00};
+		uint8_t buf[1];
+		struct qrcodegen_Segment seg = qrcodegen_makeBytes(data, 1, buf);
+		assert(seg.numChars == 1);
+		assert(seg.bitLength == 8);
+		assert(seg.data[0] == 0x00);
+		numTestCases++;
+	}
+	{
+		const uint8_t data[] = {0xEF, 0xBB, 0xBF};
+		uint8_t buf[3];
+		struct qrcodegen_Segment seg = qrcodegen_makeBytes(data, 3, buf);
+		assert(seg.numChars == 3);
+		assert(seg.bitLength == 24);
+		assert(seg.data[0] == 0xEF);
+		assert(seg.data[1] == 0xBB);
+		assert(seg.data[2] == 0xBF);
+		numTestCases++;
+	}
+}
+
+
+static void testMakeNumeric(void) {
+	{
+		struct qrcodegen_Segment seg = qrcodegen_makeNumeric("", NULL);
+		assert(seg.mode == qrcodegen_Mode_NUMERIC);
+		assert(seg.numChars == 0);
+		assert(seg.bitLength == 0);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[1];
+		struct qrcodegen_Segment seg = qrcodegen_makeNumeric("9", buf);
+		assert(seg.numChars == 1);
+		assert(seg.bitLength == 4);
+		assert(seg.data[0] == 0x90);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[1];
+		struct qrcodegen_Segment seg = qrcodegen_makeNumeric("81", buf);
+		assert(seg.numChars == 2);
+		assert(seg.bitLength == 7);
+		assert(seg.data[0] == 0xA2);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[2];
+		struct qrcodegen_Segment seg = qrcodegen_makeNumeric("673", buf);
+		assert(seg.numChars == 3);
+		assert(seg.bitLength == 10);
+		assert(seg.data[0] == 0xA8);
+		assert(seg.data[1] == 0x40);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[5];
+		struct qrcodegen_Segment seg = qrcodegen_makeNumeric("3141592653", buf);
+		assert(seg.numChars == 10);
+		assert(seg.bitLength == 34);
+		assert(seg.data[0] == 0x4E);
+		assert(seg.data[1] == 0x89);
+		assert(seg.data[2] == 0xF4);
+		assert(seg.data[3] == 0x24);
+		assert(seg.data[4] == 0xC0);
+		numTestCases++;
+	}
+}
+
+
+static void testMakeAlphanumeric(void) {
+	{
+		struct qrcodegen_Segment seg = qrcodegen_makeAlphanumeric("", NULL);
+		assert(seg.mode == qrcodegen_Mode_ALPHANUMERIC);
+		assert(seg.numChars == 0);
+		assert(seg.bitLength == 0);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[1];
+		struct qrcodegen_Segment seg = qrcodegen_makeAlphanumeric("A", buf);
+		assert(seg.numChars == 1);
+		assert(seg.bitLength == 6);
+		assert(seg.data[0] == 0x28);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[2];
+		struct qrcodegen_Segment seg = qrcodegen_makeAlphanumeric("%:", buf);
+		assert(seg.numChars == 2);
+		assert(seg.bitLength == 11);
+		assert(seg.data[0] == 0xDB);
+		assert(seg.data[1] == 0x40);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[3];
+		struct qrcodegen_Segment seg = qrcodegen_makeAlphanumeric("Q R", buf);
+		assert(seg.numChars == 3);
+		assert(seg.bitLength == 17);
+		assert(seg.data[0] == 0x96);
+		assert(seg.data[1] == 0xCD);
+		assert(seg.data[2] == 0x80);
+		numTestCases++;
+	}
+}
+
+
+static void testMakeEci(void) {
+	{
+		uint8_t buf[1];
+		struct qrcodegen_Segment seg = qrcodegen_makeEci(127, buf);
+		assert(seg.mode == qrcodegen_Mode_ECI);
+		assert(seg.numChars == 0);
+		assert(seg.bitLength == 8);
+		assert(seg.data[0] == 0x7F);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[2];
+		struct qrcodegen_Segment seg = qrcodegen_makeEci(10345, buf);
+		assert(seg.numChars == 0);
+		assert(seg.bitLength == 16);
+		assert(seg.data[0] == 0xA8);
+		assert(seg.data[1] == 0x69);
+		numTestCases++;
+	}
+	{
+		uint8_t buf[3];
+		struct qrcodegen_Segment seg = qrcodegen_makeEci(999999, buf);
+		assert(seg.numChars == 0);
+		assert(seg.bitLength == 24);
+		assert(seg.data[0] == 0xCF);
+		assert(seg.data[1] == 0x42);
+		assert(seg.data[2] == 0x3F);
+		numTestCases++;
+	}
+}
+
+
+static void testGetTotalBits(void) {
+	{
+		assert(getTotalBits(NULL, 0, 1) == 0);
+		numTestCases++;
+		assert(getTotalBits(NULL, 0, 40) == 0);
+		numTestCases++;
+	}
+	{
+		struct qrcodegen_Segment segs[] = {
+			{qrcodegen_Mode_BYTE, 3, NULL, 24},
+		};
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 2) == 36);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 10) == 44);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 39) == 44);
+		numTestCases++;
+	}
+	{
+		struct qrcodegen_Segment segs[] = {
+			{qrcodegen_Mode_ECI, 0, NULL, 8},
+			{qrcodegen_Mode_NUMERIC, 7, NULL, 24},
+			{qrcodegen_Mode_ALPHANUMERIC, 1, NULL, 6},
+			{qrcodegen_Mode_KANJI, 4, NULL, 52},
+		};
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 9) == 133);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 21) == 139);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 27) == 145);
+		numTestCases++;
+	}
+	{
+		struct qrcodegen_Segment segs[] = {
+			{qrcodegen_Mode_BYTE, 4093, NULL, 32744},
+		};
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 1) == -1);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 10) == 32764);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 27) == 32764);
+		numTestCases++;
+	}
+	{
+		struct qrcodegen_Segment segs[] = {
+			{qrcodegen_Mode_NUMERIC, 2047, NULL, 6824},
+			{qrcodegen_Mode_NUMERIC, 2047, NULL, 6824},
+			{qrcodegen_Mode_NUMERIC, 2047, NULL, 6824},
+			{qrcodegen_Mode_NUMERIC, 2047, NULL, 6824},
+			{qrcodegen_Mode_NUMERIC, 1617, NULL, 5390},
+		};
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 1) == -1);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 10) == 32766);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 27) == -1);
+		numTestCases++;
+	}
+	{
+		struct qrcodegen_Segment segs[] = {
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_KANJI, 255, NULL, 3315},
+			{qrcodegen_Mode_ALPHANUMERIC, 511, NULL, 2811},
+		};
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 9) == 32767);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 26) == -1);
+		numTestCases++;
+		assert(getTotalBits(segs, ARRAY_LENGTH(segs), 40) == -1);
+		numTestCases++;
+	}
+}
+
+
 /*---- Main runner ----*/
 
 int main(void) {
 	srand(time(NULL));
-	testGetTextProperties();
+	testAppendBitsToBuffer();
+	testAddEccAndInterleave();
 	testGetNumDataCodewords();
 	testGetNumRawDataModules();
 	testCalcReedSolomonGenerator();
@@ -458,6 +1067,15 @@ int main(void) {
 	testGetAlignmentPatternPositions();
 	testGetSetModule();
 	testGetSetModuleRandomly();
+	testIsAlphanumeric();
+	testIsNumeric();
+	testCalcSegmentBufferSize();
+	testCalcSegmentBitLength();
+	testMakeBytes();
+	testMakeNumeric();
+	testMakeAlphanumeric();
+	testMakeEci();
+	testGetTotalBits();
 	printf("All %d test cases passed\n", numTestCases);
 	return EXIT_SUCCESS;
 }

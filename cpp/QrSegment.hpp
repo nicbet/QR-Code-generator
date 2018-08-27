@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <vector>
+#include "BitBuffer.hpp"
 
 
 namespace qrcodegen {
@@ -52,12 +53,12 @@ class QrSegment final {
 		public: static const Mode ALPHANUMERIC;
 		public: static const Mode BYTE;
 		public: static const Mode KANJI;
+		public: static const Mode ECI;
 		
 		
 		/*-- Fields --*/
 		
-		/* (Package-private) An unsigned 4-bit integer value (range 0 to 15) representing the mode indicator bits for this mode object. */
-		public: const int modeBits;
+		private: int modeBits;
 		
 		private: int numBitsCharCount[3];
 		
@@ -67,7 +68,12 @@ class QrSegment final {
 		private: Mode(int mode, int cc0, int cc1, int cc2);
 		
 		
-		/*-- Method --*/
+		/*-- Methods --*/
+		
+		/* 
+		 * (Package-private) Returns the mode indicator bits, which is an unsigned 4-bit value (range 0 to 15).
+		 */
+		public: int getModeBits() const;
 		
 		/* 
 		 * (Package-private) Returns the bit width of the segment character count field for this mode object at the given version number.
@@ -83,7 +89,7 @@ class QrSegment final {
 	/* 
 	 * Returns a segment representing the given binary data encoded in byte mode.
 	 */
-	public: static QrSegment makeBytes(const std::vector<uint8_t> &data);
+	public: static QrSegment makeBytes(const std::vector<std::uint8_t> &data);
 	
 	
 	/* 
@@ -93,8 +99,9 @@ class QrSegment final {
 	
 	
 	/* 
-	 * Returns a segment representing the given text string encoded in alphanumeric mode. The characters allowed are:
-	 * 0 to 9, A to Z (uppercase only), space, dollar, percent, asterisk, plus, hyphen, period, slash, colon.
+	 * Returns a segment representing the given text string encoded in alphanumeric mode.
+	 * The characters allowed are: 0 to 9, A to Z (uppercase only), space,
+	 * dollar, percent, asterisk, plus, hyphen, period, slash, colon.
 	 */
 	public: static QrSegment makeAlphanumeric(const char *text);
 	
@@ -104,6 +111,13 @@ class QrSegment final {
 	 * The result may use various segment modes and switch modes to optimize the length of the bit stream.
 	 */
 	public: static std::vector<QrSegment> makeSegments(const char *text);
+	
+	
+	/* 
+	 * Returns a segment representing an Extended Channel Interpretation
+	 * (ECI) designator with the given assignment value.
+	 */
+	public: static QrSegment makeEci(long assignVal);
 	
 	
 	/*---- Public static helper functions ----*/
@@ -124,24 +138,38 @@ class QrSegment final {
 	/*---- Instance fields ----*/
 	
 	/* The mode indicator for this segment. */
-	public: const Mode mode;
+	private: Mode mode;
 	
 	/* The length of this segment's unencoded data, measured in characters. Always zero or positive. */
-	public: const int numChars;
+	private: int numChars;
 	
-	/* The bits of this segment packed into a byte array in big endian. */
-	public: const std::vector<uint8_t> data;
-	
-	/* The length of this segment's encoded data, measured in bits. Satisfies ceil(bitLength / 8) = data.size(). */
-	public: const int bitLength;
+	/* The data bits of this segment. */
+	private: std::vector<bool> data;
 	
 	
-	/*---- Constructor ----*/
+	/*---- Constructors ----*/
 	
 	/* 
 	 * Creates a new QR Code data segment with the given parameters and data.
 	 */
-	public: QrSegment(const Mode &md, int numCh, const std::vector<uint8_t> &b, int bitLen);
+	public: QrSegment(Mode md, int numCh, const std::vector<bool> &dt);
+	
+	
+	/* 
+	 * Creates a new QR Code data segment with the given parameters and data.
+	 */
+	public: QrSegment(Mode md, int numCh, std::vector<bool> &&dt);
+	
+	
+	/*---- Methods ----*/
+	
+	public: Mode getMode() const;
+	
+	
+	public: int getNumChars() const;
+	
+	
+	public: const std::vector<bool> &getData() const;
 	
 	
 	// Package-private helper function.
@@ -150,8 +178,8 @@ class QrSegment final {
 	
 	/*---- Private constant ----*/
 	
-	/* Maps shifted ASCII codes to alphanumeric mode character codes. */
-	private: static const int8_t ALPHANUMERIC_ENCODING_TABLE[59];
+	/* The set of all legal characters in alphanumeric mode, where each character value maps to the index in the string. */
+	private: static const char *ALPHANUMERIC_CHARSET;
 	
 };
 
